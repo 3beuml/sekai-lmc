@@ -29,8 +29,52 @@ import com.pjsk.toolbox.data.story.StoryAssetKind
  */
 object AssetUrls {
 
-    /** 音频专用 CDN：**只有日服桶有音频**，所以固定 jp（见 [musicAudio]）。 */
-    private const val AUDIO_BASE = "https://storage.sekai.best/sekai-jp-assets"
+    /** 官方素材 CDN 的 host。 */
+    const val OFFICIAL_HOST = "storage.sekai.best"
+
+    /**
+     * 第三方镜像站的 host（社区自建，路径与官方完全一致）。
+     *
+     * ⚠️ 为什么用它：**卡面与音频在国内直连官方 CDN 基本不可用**。2026-09 在校园网实测
+     * （同一个文件、同一时刻）：
+     *
+     * | 资源 | 官方 storage.sekai.best | 镜像 storage.exmeaning.com |
+     * |---|---|---|
+     * | 卡面大图 webp | 5–40 KB/s（首字节 1.2–7.5 秒） | **582 KB/s（首字节 220 毫秒）** |
+     * | 曲绘 webp | 14–41 KB/s | **1753 KB/s（73 毫秒）** |
+     * | 卡面图标 / 贴纸 / 抽卡语音 | 慢 | 21–60 毫秒 |
+     *
+     * 覆盖范围也实测过：**jp / cn / en / kr 四个区服桶都在**，卡面、图标、贴纸、
+     * 抽卡语音、长版与短版音频都能取到。
+     *
+     * ⚠️ **但它没有剧情 `.asset`**（实测官方 206、镜像 404），所以剧情、背景等
+     * 一律仍走官方；镜像只用在 [cardImage] / [cardPreview] / [cardIcon] / [cardImagePng]
+     * 与 [musicAudio] / [musicJacketJp] 这几处。
+     *
+     * ⚠️ 它是别人的服务，随时可能挂 → [MirrorFallbackInterceptor] 负责在这种时候
+     * 自动改回官方重试，所以不会出现「镜像挂了整个功能不可用」。
+     */
+    const val MIRROR_HOST = "storage.exmeaning.com"
+
+    /** 镜像站根地址（不含尾部斜杠）。 */
+    const val MIRROR_BASE = "https://$MIRROR_HOST"
+
+    /**
+     * 镜像站上的**区服素材根**。
+     *
+     * 镜像的桶名与官方相同（`sekai-<bucket>-assets`），所以只需要把 host 换掉；
+     * 实测 `sekai-jp-assets` / `sekai-cn-assets` / `sekai-en-assets` / `sekai-kr-assets` 都存在。
+     */
+    private fun mirrorAssetBase(region: ServerRegion): String =
+        "$MIRROR_BASE/sekai-${region.assetBucket}-assets"
+
+    /**
+     * 音频（镜像）：同样固定 jp 桶。
+     *
+     * 官方那边音频**只有日服桶有**（`sekai-cn-assets/music/...` 实测 404），
+     * 镜像这边虽然忽略区服、五区同一份文件，但用同一个 jp 桶名即可，路径完全一致。
+     */
+    private const val AUDIO_BASE_MIRROR = "$MIRROR_BASE/sekai-jp-assets"
 
     // ─────────────────────────────────────────────────────────────
     // 音乐
@@ -38,7 +82,7 @@ object AssetUrls {
 
     /** 曲绘。✅ 已实测：`music/jacket/jacket_s_001/jacket_s_001.webp`（jp / cn / en 三个桶都通）。 */
     fun musicJacket(region: ServerRegion, assetbundleName: String): String =
-        "${region.assetBase}/music/jacket/$assetbundleName/$assetbundleName.webp"
+        "${mirrorAssetBase(region)}/music/jacket/$assetbundleName/$assetbundleName.webp"
 
     /**
      * 曲绘（固定日服桶）。
@@ -47,7 +91,7 @@ object AssetUrls {
      * 那时拿不到界面的区服设置，而曲绘在三个桶里是同一张图，所以固定 jp 最省事。
      */
     fun musicJacketJp(assetbundleName: String): String =
-        "$AUDIO_BASE/music/jacket/$assetbundleName/$assetbundleName.webp"
+        "$AUDIO_BASE_MIRROR/music/jacket/$assetbundleName/$assetbundleName.webp"
 
     /**
      * 音频目录（✅ 实测 `music/` 下只有 `jacket/ long/ music_score/ short/` 四个子目录）。
@@ -62,10 +106,13 @@ object AssetUrls {
     /**
      * 音源文件（试听/播放用）。✅ 已实测这两个路径都能拿到 `audio/mpeg`。
      *
-     * ⚠️ **不能复用 `region.assetBase`** —— 实测 `storage.sekai.best` 的**音频只有日服桶**：
-     * `sekai-cn-assets/music/long/...` 直接 404。区域不同只影响图片和 master data，
-     * 音频一律走 jp 桶。（镜像站 `storage.exmeaning.com` 忽略区服、五个区服同一份文件，
-     * 但它是 320 kbps、单首约 4.2 MB；这里选 jp 桶的 128 kbps、约 1.7 MB，先保证"点了就响"。）
+     * ⚠️ **走镜像站，且固定 jp 桶**：
+     *  - 官方那边音频**只有日服桶有**（`sekai-cn-assets/music/long/...` 实测 404），
+     *    区域不同只影响图片与 master data；镜像路径与官方完全一致，所以直接用 jp 桶名。
+     *  - 镜像的音频是 **320 kbps、单首约 5.05 MB**（官方 jp 桶是 128 kbps、约 2.02 MB），
+     *    但实测首字节 150ms vs 官方 1.2s、整首取完约 3 秒 vs 100 秒以上
+     *    —— 在这条线路上**体积大 2.5 倍也远比官方快**，所以选镜像。
+     *  - 镜像万一挂了，[MirrorFallbackInterceptor] 会自动改回官方同路径重试。
      *
      * 两个长度：
      *  - [short] = false（默认）：**游戏版剪辑**，约 1:30~2:15，**开头有 `fillerSec` 秒空白**
@@ -74,9 +121,9 @@ object AssetUrls {
      */
     fun musicAudio(assetbundleName: String, short: Boolean = false): String =
         if (short) {
-            "$AUDIO_BASE/music/short/$assetbundleName/${assetbundleName}_short.mp3"
+            "$AUDIO_BASE_MIRROR/music/short/$assetbundleName/${assetbundleName}_short.mp3"
         } else {
-            "$AUDIO_BASE/music/long/$assetbundleName/$assetbundleName.mp3"
+            "$AUDIO_BASE_MIRROR/music/long/$assetbundleName/$assetbundleName.mp3"
         }
 
     /** 谱面（✅ 目录存在：`music/music_score/`）。内部文件名未实测。 */
@@ -110,57 +157,31 @@ object AssetUrls {
     ): String {
         val file = if (trained) "card_after_training" else "card_normal"
         val dir = if (size == CardSize.SMALL) "member_small" else "member"
-        return "${region.assetBase}/character/$dir/$assetbundleName/$file.webp"
+        return "${mirrorAssetBase(region)}/character/$dir/$assetbundleName/$file.webp"
     }
 
     /**
-     * 卡面的**预览档 URL**：交给实时缩放代理按屏幕需要的大小取图。
+     * 卡面的**列表 / 首页预览 URL**。
      *
-     * 为什么需要：CDN 上最小的卡面变体是 `member_small`（940×530），实测 **58.4 KB**，
-     * 而这个 CDN 的下载速度只有约 50 KB/s → **一张要 1.2 秒**，一屏 8 张要 9 秒多。
-     * 界面其实用不到 940px 宽（列表每半边约 585px、首页格子约 796px），
-     * 所以让代理替我们缩放，实测体积：
-     *
-     * | 宽度 | 体积 | 相对原图 |
-     * |---|---|---|
-     * | 940（CDN 原图） | 58.4 KB | 1× |
-     * | 480 | **15.7 KB** | 快 3.7 倍 |
-     * | 360 | 9.8 KB | 快 6 倍 |
-     * | 240 | 5.0 KB | 快 11.7 倍 |
-     *
-     * ⚠️ **依赖第三方免费服务 `wsrv.nl`**（`images.weserv.nl` 的新域名）。
-     * 它只是把请求转发给素材 CDN 再缩放，所以：
-     *  - 素材本身的来源没变（还是 storage.sekai.best）；
-     *  - 但它一旦挂掉或限流，预览就会失败。
-     * 因此调用方必须能回退 —— [cardImage] 始终返回直连 CDN 的地址，
-     * 详情大图与「下载原图」一律走直连，不经过代理。
+     * ⚠️ 这里原来是走第三方缩放代理 `wsrv.nl`，把 940px 的原图缩到 800px
+     * （58 KB → 35 KB），理由是官方 CDN 实测只有约 50 KB/s、58 KB 要 1.2 秒。
+     * **换成镜像线路后不再需要这一跳**：镜像实测 582 KB/s，原图 58 KB 只需约 0.1 秒，
+     * 直连还少一个第三方依赖、画质也更好。解码尺寸仍由 [PREVIEW_WIDTH] 约束。
      */
     fun cardPreview(
         region: ServerRegion,
         assetbundleName: String,
         trained: Boolean,
-        width: Int = PREVIEW_WIDTH,
         size: CardSize = CardSize.SMALL,
-    ): String {
-        val direct = cardImage(region, assetbundleName, trained, size)
-        val encoded = direct.removePrefix("https://")
-        return "$PREVIEW_PROXY?url=$encoded&w=$width&output=webp&q=$PREVIEW_QUALITY&we"
-    }
+    ): String = cardImage(region, assetbundleName, trained, size)
 
     /**
-     * 列表/首页预览用的宽度。
+     * 卡面预览的**解码宽度**（Coil 按它采样，见 `ui/common/CardArt.kt`）。
      *
-     * 取 **800** 而不是更小：列表每个半边约需 585px、首页格子约需 796px，
-     * 之前用 480 会被放大 → 用户反馈「有点糊」。800 覆盖两处、不再放大；
-     * 而 CDN 原图是 940px / 58.4 KB，800px 约 35 KB，仍省 40%。
+     * 取 800：首页最宽的格子约 796px、列表每半边约 585px，覆盖两处且不再放大；
+     * 比 CDN 原图（940px）略小，单张解码内存从约 1.5 MB 降到约 1.2 MB。
      */
     const val PREVIEW_WIDTH = 800
-
-    /** 预览档质量。70 在这个尺寸下肉眼基本看不出与原图的差别。 */
-    private const val PREVIEW_QUALITY = 70
-
-    /** 实时缩放代理（见 [cardPreview] 的说明与风险）。 */
-    private const val PREVIEW_PROXY = "https://wsrv.nl/"
 
     /** 卡面尺寸档位。列表用 [SMALL]（940×530），详情大图用 [LARGE]（2520×1440）。 */
     enum class CardSize { SMALL, LARGE }
@@ -176,7 +197,7 @@ object AssetUrls {
      */
     fun cardIcon(region: ServerRegion, assetbundleName: String, trained: Boolean): String {
         val status = if (trained) "after_training" else "normal"
-        return "${region.assetBase}/thumbnail/chara/${assetbundleName}_$status.webp"
+        return "${mirrorAssetBase(region)}/thumbnail/chara/${assetbundleName}_$status.webp"
     }
 
     /**

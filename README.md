@@ -45,14 +45,28 @@ AA:49:A7:B9:BC:D9:CE:75:18:56:B3:DC:EC:7C:0C:2C:DD:F3:F5:05:9F:22:B7:9F:10:DD:DB
 ```
 master data   https://sekai-world.github.io/sekai-master-db-diff/<file>.json      （日服）
               https://sekai-world.github.io/sekai-master-db-cn-diff/<file>.json   （简中名叠加层）
-素材 CDN      https://storage.sekai.best/sekai-jp-assets/...                      （图片 / 音频）
+素材 CDN      https://storage.exmeaning.com/sekai-jp-assets/...                   （图片 / 音频，第三方镜像）
+              官方为 https://storage.sekai.best/...（镜像不可用时自动回退到这里）
 版本探测      https://api.github.com/repos/Sekai-World/sekai-master-db-diff/commits
 歌词          Sekaipedia（CC BY-SA 4.0，界面内标注来源）
 ```
 
 以**日服**数据为主结构与进度，**简中服**只用来补中文名（按 id 关联，缺了就回退显示日文原名）。
-构建时把数据裁剪后打进 APK（66 张表 / 约 12 MB），首次启动后台导入；之后只做增量更新
-（版本没变则零下载，命中 304 的表不重复下）。这些都是社区维护的公开仓库与公开 CDN，不是官方接口。
+构建时把数据裁剪后打进 APK（66 张表 / 约 12 MB），**首次启动在后台离线导入，不联网下载任何东西**；
+之后只做增量更新（版本没变则零下载；命中 304 或条件请求的表不重复下）。
+这些都是社区维护的公开仓库与公开 CDN，不是官方接口。
+
+### ⚠️ 关于素材镜像
+
+卡面与音频默认走**第三方社区镜像** `storage.exmeaning.com`，因为直连官方 CDN 在国内基本不可用
+（2026-09 实测同一文件：官方 5–40 KB/s、首字节 1.2–7.5 秒；镜像 582–1753 KB/s、首字节 21–220 毫秒）。
+镜像与官方**路径完全一致**，实测 jp / cn / en / kr 四个区服桶都在。
+
+- 镜像**没有剧情 `.asset`**（实测 404），所以剧情、贴纸、抽卡语音、背景等仍走官方；
+- 镜像是别人的服务，**随时可能挂掉** → App 里有一层兜底：镜像请求失败（超时 / 5xx / 404）时
+  自动改回官方 CDN 重试一次，所以不会出现「镜像挂了整个功能不可用」；
+- 如果不希望使用第三方镜像，可以在 `data/remote/AssetUrls.kt` 里把 `mirrorAssetBase()` 换成
+  `region.assetBase`、把 `AUDIO_BASE_MIRROR` 换成官方地址后自行构建。
 
 ## 从源码构建
 
@@ -94,6 +108,7 @@ master data   https://sekai-world.github.io/sekai-master-db-diff/<file>.json    
 | [Sekai-World/sekai-viewer](https://github.com/Sekai-World/sekai-viewer)（sekai.best） | GPL-3.0 | 数据格式与界面交互的参考 |
 | [StarMoe-org/Moesekai](https://github.com/StarMoe-org/Moesekai)（pjsk.moe） | AGPL-3.0 | 同上 |
 | [Sekai-World/sekai-master-db-diff](https://github.com/Sekai-World/sekai-master-db-diff) | 无 LICENSE | 数据来源 |
+| `storage.exmeaning.com`（exmeaning 社区镜像） | — | 卡面与音频的加速线路（第三方服务，详见上文「关于素材镜像」） |
 | [TheOriginalAyaka/sekai-stickers](https://github.com/TheOriginalAyaka/sekai-stickers)（st.ayaka.one） | MIT | 只在首页提供外链跳转，未使用其代码与素材 |
 | [Parallel-SEKAI/PJSK-Sticker](https://github.com/Parallel-SEKAI/PJSK-Sticker) | GPL-3.0 | 曾参考其功能设计，后决定不做该功能，相关代码已删除 |
 | [Sonolus](https://sonolus.com/) | — | 只在首页提供外链 |

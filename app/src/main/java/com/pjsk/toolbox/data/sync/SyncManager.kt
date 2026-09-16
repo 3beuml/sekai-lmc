@@ -1,6 +1,7 @@
 package com.pjsk.toolbox.data.sync
 
 import android.content.Context
+import android.util.Log
 import com.pjsk.toolbox.data.db.AppDatabase
 import com.pjsk.toolbox.data.db.SyncStateEntity
 import com.pjsk.toolbox.data.db.VersionStateEntity
@@ -205,7 +206,12 @@ class SyncManager(
 
         val region = _state.value.region
         val modules = _state.value.selectedModules
-        val specs = TableCatalog.forModules(modules)
+        // 同步顺序 = 模块优先级（卡牌 / 歌曲在前，卡池垫底）+ 组内按体积升序。
+        // 慢线路上「先把最常用的数据拿到手」远比「按目录一次性铺开」重要：
+        // 用户点进卡牌页就该是最新的，而不是等 40 MB 的卡池表下完。
+        val specs = TableCatalog.forModules(modules).sortedWith(
+            compareBy({ it.module.syncPriority }, { it.approxBytes }),
+        )
         if (specs.isEmpty()) {
             log("没有选中任何数据模块。")
             return@withContext
@@ -229,9 +235,18 @@ class SyncManager(
         val allTablesPresent = specs.all { it.fileName in alreadySynced }
         if (!force && info?.masterVersion != null && info.masterVersion == localVersion && allTablesPresent) {
             log("数据已是最新（master version ${info.masterVersion}），本次未下载任何文件。")
+            // 同时也打到 logcat：这一条是「首次启动零下载」的关键判据，
+            // 只写在界面日志里的话，测冷启动时根本没法从外部确认它有没有生效。
+            Log.i(TAG, "同步跳过：master version ${info.masterVersion} 与本地一致且 ${specs.size} 张表都有记录，未下载任何文件")
             _state.value = _state.value.copy(running = false, currentTable = null, localVersion = localVersion)
             return@withContext
         }
+        // 走到这里说明要真的下载了：把判据一并打出来，方便事后判断「它为什么决定下载」
+        Log.i(
+            TAG,
+            "开始同步：远端版本=${info?.masterVersion ?: "未探到"} 本地版本=${localVersion ?: "无"} " +
+                "选定表=${specs.size} 张 全部有记录=$allTablesPresent 强制=$force",
+        )
 
         var failures = 0
 
@@ -427,18 +442,28 @@ class SyncManager(
     }
 
     companion object {
+        /** logcat 标签：显式启动同步 / 跳过同步的判据都打在这里，便于测冷启动时从外部核对。 */
+        private const val TAG = "SyncManager"
+
         private const val KEY_REGION = "region"
         private const val KEY_MODULES = "modules"
 
         /**
-         * 默认勾选的模块：只包含「体积可控」的四块。
-         * 卡牌(35MB+)、扭蛋(47MB)、服装(56MB) 默认不勾，让用户明确知道要花多少流量。
+         * 默认勾选的模块。
+         *
+         * 现在**包含卡牌**：卡牌是这个 App 的主入口之一，用户即使用内置快照能用，
+         * 也会希望新卡上线后列表是新的。代价是版本真的变化时会多下约 35 MB
+         * （`cards.json` 33.4 MB + 卡牌剧情 1.6 MB），但那只在**版本变化时**才发生
+         * —— 平时同步靠版本号与条件请求，一个文件都不下。
+         *
+         * 仍然不默认勾选的是**扭蛋**（46 MB 的 `gachas.json`，只在首页看一眼）与
+         * **贴纸**（目前没有对应的图鉴界面）。
          */
         val DEFAULT_MODULES: Set<DataModule> = setOf(
-            DataModule.CHARACTER,
+            DataModule.CARD,
             DataModule.MUSIC,
+            DataModule.CHARACTER,
             DataModule.EVENT,
-            DataModule.STICKER,
         )
     }
 }

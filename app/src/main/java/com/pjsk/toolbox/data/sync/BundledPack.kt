@@ -1,9 +1,11 @@
 package com.pjsk.toolbox.data.sync
 
 import android.content.Context
+import android.util.Log
 import com.pjsk.toolbox.data.db.AppDatabase
 import com.pjsk.toolbox.data.db.SyncStateEntity
 import com.pjsk.toolbox.data.db.VersionStateEntity
+import com.pjsk.toolbox.data.remote.MasterRepository
 import com.pjsk.toolbox.data.remote.ServerRegion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -12,6 +14,9 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.InputStreamReader
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 /**
  * 导入**内置数据快照**（打包在 APK 的 `assets/datapack/` 里）。
@@ -31,6 +36,7 @@ class BundledPack(
     private val context: Context,
     private val db: AppDatabase,
     private val importer: MasterImporter,
+    private val repository: MasterRepository,
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -72,15 +78,21 @@ class BundledPack(
     /**
      * 执行导入。
      *
-     * @param onProgress (已完成表数, 总表数, 当前表名)。表是按「首页优先」的顺序导入的，
-     *   所以首页需要的表会最先就绪，用户很快就能看到第一屏内容。
+     * @param onProgress (已完成表数, 总表数, 当前表名)。表按 [orderForImport] 的顺序导入，
+     *   所以**卡牌与歌曲**（用户最常用的两块）会最先就绪，用户几秒内就有内容可看。
      */
     suspend fun install(
         onProgress: (done: Int, total: Int, table: String) -> Unit = { _, _, _ -> },
     ): Int = withContext(Dispatchers.IO) {
         val manifest = readManifest() ?: return@withContext 0
-        val entries = orderHomeFirst(manifest.entries)
+        val entries = orderForImport(manifest.entries)
         val now = System.currentTimeMillis()
+        val started = System.nanoTime()
+
+        // 快照的数据版本对应的 commit 时间 → 写进每张表的「条件请求种子」。
+        // 这样首轮在线同步用 If-Modified-Since 就能让没变过的表直接 304，
+        // 不必把刚导进去的十几 MB 又完整下载一遍（见 MasterRepository.sinceFileOf）。
+        val sinceDate = manifest.snapshot?.versionCommitAt?.let(::isoToHttpDate)
 
         entries.forEachIndexed { index, entry ->
             val fileName = entry.file ?: return@forEachIndexed
@@ -88,9 +100,14 @@ class BundledPack(
 
             // **表里已经有数据就跳过**：内置快照可能比用户在线同步过的数据旧，不能覆盖。
             // 判据同样是**数实际行数**（见 needsInstall 的说明：同步记录里的 rowCount 不可信）。
-            if (db.masterDao().count(fileName) > 0) return@forEachIndexed
+            if (db.masterDao().count(fileName) > 0) {
+                // 已经有数据的表也要补种子（否则它永远拿不到条件请求的优惠）
+                sinceDate?.let { repository.seedModifiedSince(ServerRegion.DEFAULT, fileName, it) }
+                return@forEachIndexed
+            }
 
             val dataPath = "$DIR/$fileName"
+            val tableStarted = System.nanoTime()
             val opened = runCatching {
                 context.assets.open(dataPath).use { input ->
                     InputStreamReader(input, Charsets.UTF_8).use { reader ->
@@ -116,7 +133,9 @@ class BundledPack(
             }
 
             // 记一条同步状态，让「数据同步」页能正确显示哪些模块已经有数据。
-            // ETag 故意留空：内置数据没有条件请求的凭据，下次在线同步会重新校验一遍。
+            // ETag 故意留空：内置数据没有条件请求的凭据。
+            // 但我们会另外写一个「不早于快照 commit 时间」的种子文件，
+            // 让首轮同步能靠 If-Modified-Since 拿到 304（见上面 sinceDate）。
             db.syncStateDao().upsert(
                 SyncStateEntity(
                     tableName = fileName,
@@ -128,9 +147,19 @@ class BundledPack(
                     module = entry.module.orEmpty(),
                 ),
             )
+            sinceDate?.let { repository.seedModifiedSince(ServerRegion.DEFAULT, fileName, it) }
+
+            val ms = (System.nanoTime() - tableStarted) / 1_000_000
+            if (ms >= SLOW_TABLE_LOG_MS) Log.i(TAG, "较慢的表：$fileName 用时 ${ms}ms")
         }
 
         onProgress(entries.size, entries.size, "")
+        Log.i(
+            TAG,
+            "内置数据导入完成：${entries.size} 张表，用时 " +
+                "${(System.nanoTime() - started) / 1_000_000}ms" +
+                if (failures.isEmpty()) "" else "，失败 ${failures.size} 张",
+        )
 
         // 记下快照对应的官方版本，之后在线同步可以据此「版本没变就跳过」。
         manifest.snapshot?.let { snapshot ->
@@ -176,6 +205,7 @@ class BundledPack(
                 file = file,
                 module = obj.str("module"),
                 rows = obj.str("rows")?.toIntOrNull() ?: 0,
+                bytes = obj.str("bytes")?.toLongOrNull() ?: 0L,
                 hasOverlay = obj.str("hasOverlay") == "true",
             )
         }
@@ -183,16 +213,20 @@ class BundledPack(
     }.getOrNull()
 
     /**
-     * 按「首页优先」排序。
+     * 导入顺序：**卡牌与歌曲最先**（P0），其次是首页其余区块（P1），最后是浏览用表（P2）。
      *
-     * 首页要显示当前活动、最新卡面、最新歌曲、角色生日，这些对应的表先导，
-     * 用户打开 App 一两秒就能看到第一屏有内容；图鉴用的其余表在后台继续导。
+     * 具体名单与理由见 [DatapackImportOrder]（那边抽了独立对象，好在 logic-check 里断言）。
      */
-    private fun orderHomeFirst(entries: List<PackEntry>): List<PackEntry> {
-        val priority = HOME_PRIORITY.withIndex().associate { (index, name) -> name to index }
-        return entries.sortedBy { priority[it.file] ?: Int.MAX_VALUE }
-    }
+    private fun orderForImport(entries: List<PackEntry>): List<PackEntry> =
+        entries.sortedWith(
+            compareBy(
+                { DatapackImportOrder.group(it.file) },
+                { DatapackImportOrder.orderWithinGroup(it.file) },
+                { it.bytes },
+            ),
+        )
 
+    /** `2026-09-13T15:00:14Z` → `Sun, 13 Sep 2026 15:00:14 GMT`；解析不了就返回 null（不发这个头）。 */
     private fun JsonObject.str(key: String): String? =
         (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.content
 
@@ -209,30 +243,32 @@ class BundledPack(
         val file: String?,
         val module: String?,
         val rows: Int,
+        val bytes: Long,
         val hasOverlay: Boolean,
     )
 
     private companion object {
+        const val TAG = "BundledPack"
         const val DIR = "datapack"
         const val MANIFEST = "$DIR/manifest.json"
 
-        /** 首页用得上的表，放最前面导。 */
-        val HOME_PRIORITY = listOf(
-            "cards.json",
-            "cardRarities.json",
-            "cardSupplies.json",
-            "skills.json",
-            "gameCharacters.json",
-            "gameCharacterUnits.json",
-            "characterProfiles.json",
-            "events.json",
-            "eventCards.json",
-            "eventMusics.json",
-            "musics.json",
-            "musicDifficulties.json",
-        )
+        /** 单张表超过这个耗时就打一行日志，方便日后定位「首次打开慢」到底慢在哪张表。 */
+        const val SLOW_TABLE_LOG_MS = 400L
     }
 }
+
+/**
+ * `2026-09-13T15:00:14Z` → `Sun, 13 Sep 2026 15:00:14 GMT`（HTTP 日期，`If-Modified-Since` 要求的格式）。
+ *
+ * 解析不了就返回 `null`，调用方据此**不发这个头** —— 宁可不省流量，也不要发一个格式非法的日期
+ * 让服务器返回 400 或把条件请求判成不成立。
+ *
+ * 放在类外、且是 public，是为了能在 logic-check 里直接断言
+ * （logic-check 是另一个编译单元，看不到 `internal` 成员）。
+ */
+fun isoToHttpDate(iso: String): String? = runCatching {
+    DateTimeFormatter.RFC_1123_DATE_TIME.format(Instant.parse(iso).atZone(ZoneOffset.UTC))
+}.getOrNull()
 
 /** 内置快照的导入状态，供首页显示一条不打扰的进度提示。 */
 sealed interface BundledState {

@@ -13,11 +13,15 @@
  *   而当前 UI 还用不到它们（要抓就显式写：node ... COSTUME GACHA）。
  */
 import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 const JP = 'https://sekai-world.github.io/sekai-master-db-diff/';
 // 往回扫 20 条提交找版本号：机器人定时提交的信息里没有版本号（见文件末尾的说明）
 const COMMIT_API_20 =
   'https://api.github.com/repos/Sekai-World/sekai-master-db-diff/commits?per_page=20';
+// 仓库里所有文件的 blob sha —— 用来判断本地文件到底是不是最新的（见 fetchTreeShas）
+const TREE_API =
+  'https://api.github.com/repos/Sekai-World/sekai-master-db-diff/git/trees/main?recursive=1';
 
 const outDir = new URL('./raw/', import.meta.url);
 mkdirSync(outDir, { recursive: true });
@@ -47,31 +51,93 @@ let skipped = 0;
 let failed = 0;
 const started = Date.now();
 
+/**
+ * 一次拿到仓库里所有文件的 **blob sha**，用它当唯一权威判据。
+ *
+ * 为什么要这么较真：反复出现过「本地文件存在、体积也差不多，但其实落后于仓库」的情况。
+ * 真事：`cards.json` 在 09-13 15:00 的版本提交里加了 5 张新卡，
+ * 而我们在 09-13 21:46 抓下来的却是**CDN 上的陈旧缓存**（少 5 张卡），
+ * 结果这个旧版本被打进了快照 —— 用户看到的就是「卡牌数据不够新」。
+ *
+ * 体积对不上能发现大问题，但对不上「少 5 张卡」这种（124 KB / 34 MB ≈ 0.4%）完全无能为力，
+ * 而 git blob sha 是内容哈希：差一个字节都对不上。
+ */
+async function fetchTreeShas() {
+  try {
+    const res = await fetch(TREE_API, {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'sekai-lmc-datapack' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json();
+    if (json.truncated) {
+      console.log('  ⚠️ 仓库树响应被 GitHub 截断，本次退化为「只比体积」');
+      return {};
+    }
+    const map = {};
+    for (const entry of json.tree ?? []) {
+      if (entry.type === 'blob') map[entry.path] = entry.sha;
+    }
+    console.log(`  已取到仓库 ${Object.keys(map).length} 个文件的 blob sha`);
+    return map;
+  } catch (e) {
+    console.log(`  ⚠️ 取仓库树失败（${e.message}），本次退化为「只比体积」`);
+    return {};
+  }
+}
+
+/** 计算一段内容的 git blob sha（`sha1("blob <字节数>\0" + 内容)`）。 */
+function gitBlobSha(buf) {
+  return createHash('sha1').update(`blob ${buf.length}\0`, 'utf8').update(buf).digest('hex');
+}
+
+const treeShas = await fetchTreeShas();
+
 /** 并发下载；失败重试一次（GitHub Pages 偶发 5xx）。 */
 async function grab(spec) {
   const dest = new URL(spec.file, outDir);
-  // 已存在且大小对得上就跳过（重跑脚本时不用重下 46 MB）
-  if (existsSync(dest) && Math.abs(statSync(dest).size - spec.bytes) < spec.bytes * 0.02 + 1024) {
-    skipped++;
-    return;
+  const expectedSha = treeShas[spec.file] ?? null;
+
+  // 本地已有：只有当它的 blob sha 与仓库**完全一致**才跳过
+  if (existsSync(dest)) {
+    if (expectedSha && gitBlobSha(readFileSync(dest)) === expectedSha) {
+      skipped++;
+      return;
+    }
+    if (!expectedSha) {
+      const near = Math.abs(statSync(dest).size - spec.bytes) < spec.bytes * 0.02 + 1024;
+      if (near) {
+        skipped++;
+        return;
+      }
+    }
+    // 否则：本地是旧版本（或被截断），下面重下
   }
+
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const res = await fetch(JP + spec.file);
+      // ⚠️ 必须绕过 CDN 缓存：Pages 前面是 Fastly（max-age=600），
+      // 裸 fetch 有可能拿到部署前的旧副本 —— 这正是上面那次「少 5 张卡」的来源。
+      const url = `${JP}${spec.file}?cb=${Date.now()}`;
+      const res = await fetch(url, { headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' } });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text();
-      // 完整性校验：**必须比字节数**。
-      // 踩过的坑：第一版拿 `text.length`（字符数）去比目录里的字节数，
-      // 而这个数据里全是日文（一个日文 3 字节），于是 17 张含日文的表被误判成
-      // 「大小异常」而**根本没写盘**（包括 musics.json、gachas.json）。
-      const byteLength = Buffer.byteLength(text, 'utf8');
-      const drift = Math.abs(byteLength - spec.bytes) / spec.bytes;
-      if (drift > 0.02) {
-        throw new Error(`大小异常：实得 ${byteLength} 字节，目录记录 ${spec.bytes} 字节`);
+      const buf = Buffer.from(await res.arrayBuffer());
+
+      if (expectedSha) {
+        const actual = gitBlobSha(buf);
+        if (actual !== expectedSha) {
+          throw new Error(`内容与仓库不一致（sha 实得 ${actual.slice(0, 12)}，仓库 ${expectedSha.slice(0, 12)}）—— 多半还是 CDN 缓存`);
+        }
+      } else {
+        // 退化路径：比字节数。**必须比字节**，不能比字符数
+        // （这个数据里全是日文，一个日文 3 字节，早期版本因此漏写过 17 张表）。
+        const drift = Math.abs(buf.length - spec.bytes) / spec.bytes;
+        if (drift > 0.02) {
+          throw new Error(`大小异常：实得 ${buf.length} 字节，目录记录 ${spec.bytes} 字节`);
+        }
       }
-      writeFileSync(dest, text, 'utf8');
+      writeFileSync(dest, buf);
       done++;
-      process.stdout.write(`\r已下载 ${done} / 跳过 ${skipped} / 失败 ${failed} 张…`);
+      process.stdout.write(`\r已下载 ${done} / 已是最新 ${skipped} / 失败 ${failed} 张…`);
       return;
     } catch (e) {
       if (attempt === 2) {

@@ -66,13 +66,23 @@ enum class DataModule(
     val id: String,
     val displayName: String,
     val description: String,
+    /**
+     * 同步顺序（越小越先），也是界面上模块列表的顺序。
+     *
+     * 依据是「用户多常用 × 内容多常变」：
+     *  - **卡牌、音乐**是最常用的两块，而且几乎每次活动更新都会变 → 最前面；
+     *  - 角色、活动是列表与详情的支撑数据 → 中间；
+     *  - **卡池垫底**：`gachas.json` 有 44.7 MB，而它只在首页看一眼。
+     *    放在最后，慢线路上不会因为它把卡牌/歌曲挤到后面。
+     */
+    val syncPriority: Int,
 ) {
-    CHARACTER("character", "角色", "角色、组合、角色资料"),
-    MUSIC("music", "音乐", "歌曲、难度、音源、曲师、标签"),
-    EVENT("event", "活动", "活动列表、活动卡、加成、活动剧情"),
-    STICKER("sticker", "贴纸", "表情包制作所需的贴纸素材定义"),
-    CARD("card", "卡牌", "卡牌、星级、技能、卡牌剧情（体积较大）"),
-    GACHA("gacha", "扭蛋卡池", "卡池、抽卡券、天井（体积很大）"),
+    CARD("card", "卡牌", "卡牌、星级、技能、卡牌剧情（体积较大）", 0),
+    MUSIC("music", "音乐", "歌曲、难度、音源、曲师、标签", 1),
+    CHARACTER("character", "角色", "角色、组合、角色资料", 2),
+    EVENT("event", "活动", "活动列表、活动卡、加成、活动剧情", 3),
+    STICKER("sticker", "贴纸", "表情包制作所需的贴纸素材定义", 4),
+    GACHA("gacha", "扭蛋卡池", "卡池、抽卡券、天井（体积很大）", 5),
     ;
 }
 
@@ -147,7 +157,10 @@ object TableCatalog {
         TableSpec("musicArtists.json", DataModule.MUSIC, 32_461L, cnOverlay = true),
         TableSpec("musicOriginals.json", DataModule.MUSIC, 51_935L, cnOverlay = true),
         TableSpec("musicSoundTracks.json", DataModule.MUSIC, 53_837L, cnOverlay = true),
-        TableSpec("musicCategories.json", DataModule.MUSIC, 66_535L, cnOverlay = true),
+        // ⚠️ 简中服仓库里**没有** musicCategories.json（实测 404，仓库树里也没有），
+        // 所以这里不能标 cnOverlay —— 标了只会让每次同步都白跑一次 404。
+        // 效果：分类名用日文原名（上游简中服本来就没给这一项）。
+        TableSpec("musicCategories.json", DataModule.MUSIC, 66_535L),
         TableSpec("musicVideoCharacters.json", DataModule.MUSIC, 125_974L, cnOverlay = true),
         TableSpec("musicTags.json", DataModule.MUSIC, 140_613L, cnOverlay = true),
         TableSpec("musicDifficulties.json", DataModule.MUSIC, 460_717L),

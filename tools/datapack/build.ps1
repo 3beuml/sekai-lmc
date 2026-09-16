@@ -15,21 +15,18 @@ $rawDir = Join-Path $PSScriptRoot 'raw'
 $cnDir = Join-Path $PSScriptRoot 'cn'
 
 if (-not $skipFetch) {
-    if (-not (Test-Path (Join-Path $rawDir 'cards.json'))) {
-        Write-Host '源数据缺失，先下载（约 92 MB）…' -ForegroundColor Yellow
-        & node (Join-Path $PSScriptRoot 'fetch-raw.mjs')
-        if ($LASTEXITCODE -ne 0) { throw '下载日服源数据失败' }
-    } else {
-        Write-Host '源数据已存在，跳过下载（要强制重下就先删掉 tools\datapack\raw）'
-    }
-    if (-not (Test-Path (Join-Path $cnDir 'cards.json'))) {
-        Write-Host '中文叠加层缺失，先下载…' -ForegroundColor Yellow
-        & node (Join-Path $PSScriptRoot 'fetch-cn-overlay.mjs')
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host '⚠️ 简中服数据下载失败，快照将**不含中文名**（仍然可用，只是名字是日文）' -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host '中文叠加层已存在，跳过下载'
+    # ⚠️ 这里原来是「raw\cards.json 存在就跳过下载」，那是个**会让快照悄悄过期的陷阱**：
+    # 数据在 09-13 的版本提交里更新过，而本地缓存是更早抓的（当时还抓到了 CDN 的旧副本），
+    # 于是这份旧数据被打进了快照 —— 用户看到的现象是「卡牌少了 5 张、歌曲少了 2 首」。
+    # 现在改成**每次都跑抓取脚本**：它内部按仓库的 blob sha 逐个核对，
+    # 已经是最新的会跳过，只有对不上的才重下（实测 12 秒左右，比事后排查便宜得多）。
+    Write-Host '核对源数据是否与上游仓库一致（只重下对不上的表）…'
+    & node (Join-Path $PSScriptRoot 'fetch-raw.mjs')
+    if ($LASTEXITCODE -ne 0) { throw '下载日服源数据失败' }
+
+    & node (Join-Path $PSScriptRoot 'fetch-cn-overlay.mjs')
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '⚠️ 简中服数据有不完整之处（见上面的 404 列表），快照的中文名会少那几张表' -ForegroundColor Yellow
     }
 }
 

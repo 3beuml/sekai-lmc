@@ -99,8 +99,18 @@ import com.pjsk.toolbox.util.moveMatchesFirst
 import com.pjsk.toolbox.util.parseHexColor
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import com.pjsk.toolbox.data.remote.AssetUrls
+import com.pjsk.toolbox.data.remote.DataModule
+import com.pjsk.toolbox.data.remote.ServerRegion
+import com.pjsk.toolbox.data.remote.TableCatalog
+import com.pjsk.toolbox.data.story.StoryAssetKind
+import com.pjsk.toolbox.data.sync.DatapackImportOrder
+import com.pjsk.toolbox.data.sync.SyncManager
+import com.pjsk.toolbox.data.sync.isoToHttpDate
 import java.io.File
 
 /**
@@ -1943,6 +1953,140 @@ fun main(args: Array<String>) {
     )
     checkEq("重置只清筛选、保留排序", StoryQuery(units = setOf("idol"), sort = StorySort.OLDEST).cleared().sort, StorySort.OLDEST)
     checkEq("重置后不再是筛选态", StoryQuery(units = setOf("idol")).cleared().isFiltering, false)
+
+    // ─────────────────────────────────────────────────────────
+    // 首次启动体验：导入顺序 / 同步顺序 / 镜像线路（§11.37）
+    //
+    // 这几项的共性是「写错了不会报错，只会表现成体验变差」：
+    // 导入顺序错了 → 打开 App 后卡牌页半天没数据；
+    // 同步顺序错了 → 慢线路上先下 44 MB 的卡池表，卡牌反而排在后面；
+    // 镜像地址写错或漏了兜底 → 卡面/音频整块不可用。
+    // 所以都要有断言钉住。
+    // ─────────────────────────────────────────────────────────
+    section("内置数据导入顺序：卡牌与歌曲最先")
+
+    val packDir = "app/src/main/assets/datapack"
+
+    check("cards.json 属于 P0", DatapackImportOrder.group("cards.json") == 0)
+    check("musics.json 属于 P0", DatapackImportOrder.group("musics.json") == 0)
+    check("musicDifficulties.json 属于 P0", DatapackImportOrder.group("musicDifficulties.json") == 0)
+    check("skills.json 属于 P0", DatapackImportOrder.group("skills.json") == 0)
+    check("gameCharacters.json 属于 P0（卡牌与歌曲都要用）", DatapackImportOrder.group("gameCharacters.json") == 0)
+    check("events.json 属于 P1", DatapackImportOrder.group("events.json") == 1)
+    check("gachas.json 属于 P1", DatapackImportOrder.group("gachas.json") == 1)
+    check("characterRanks.json 归 P2", DatapackImportOrder.group("characterRanks.json") == 2)
+    check("没见过的表归 P2", DatapackImportOrder.group("brandNewTable.json") == 2)
+    check("null 归 P2", DatapackImportOrder.group(null) == 2)
+
+    check("卡牌排在歌曲前面（首页主入口更早可用）",
+        DatapackImportOrder.orderWithinGroup("cards.json") < DatapackImportOrder.orderWithinGroup("musics.json"),
+        "cards=${DatapackImportOrder.orderWithinGroup("cards.json")} musics=${DatapackImportOrder.orderWithinGroup("musics.json")}")
+
+    val p0AndP1Overlap = DatapackImportOrder.P0_CARD_AND_MUSIC.intersect(DatapackImportOrder.P1_HOME.toSet())
+    check("P0 与 P1 没有重叠", p0AndP1Overlap.isEmpty(), "重叠=$p0AndP1Overlap")
+    check("P0 名单里没有重复项",
+        DatapackImportOrder.P0_CARD_AND_MUSIC.size == DatapackImportOrder.P0_CARD_AND_MUSIC.toSet().size)
+    check("P1 名单里没有重复项",
+        DatapackImportOrder.P1_HOME.size == DatapackImportOrder.P1_HOME.toSet().size)
+
+    // 拿一份真实的快照清单，验证排序结果：卡牌/歌曲在前、P2 在最后且按体积升序
+    val manifestText = File(packDir, "manifest.json").takeIf { it.isFile }?.readText()
+    if (manifestText == null) {
+        check("读到内置快照清单（找不到就跳过排序验证）", false, "缺少 ${File(packDir, "manifest.json").absolutePath}")
+    } else {
+        val manifest = json.parseToJsonElement(manifestText).jsonObject
+        val tables = manifest["tables"]?.jsonArray.orEmpty().mapNotNull { it as? JsonObject }
+        val entries = tables.mapNotNull { row ->
+            val file = row.stringValue("file") ?: return@mapNotNull null
+            Triple(file, row.intValue("rows") ?: 0, (row.stringValue("bytes")?.toLongOrNull() ?: 0L))
+        }
+        check("清单里有 66 张表", entries.size == 66, "实际=${entries.size}")
+
+        val sorted = entries.sortedWith(
+            compareBy(
+                { DatapackImportOrder.group(it.first) },
+                { DatapackImportOrder.orderWithinGroup(it.first) },
+                { it.third },
+            ),
+        ).map { it.first }
+
+        check("排序后第一张表就是卡牌相关（cards.json 或角色基础表）",
+            sorted.first() in setOf("gameCharacters.json", "cards.json"), "第一张=${sorted.first()}")
+        val firstCardIdx = sorted.indexOf("cards.json")
+        val firstEventIdx = sorted.indexOf("events.json")
+        val firstGachaIdx = sorted.indexOf("gachas.json")
+        check("cards.json 排在 events.json 之前", firstCardIdx in 0 until firstEventIdx, "cards=$firstCardIdx events=$firstEventIdx")
+        check("cards.json 排在 gachas.json 之前", firstCardIdx in 0 until firstGachaIdx, "cards=$firstCardIdx gachas=$firstGachaIdx")
+        check("前三张都是卡牌/歌曲相关的表",
+            sorted.take(3).all { DatapackImportOrder.group(it) == 0 }, "前三=${sorted.take(3)}")
+
+        // P2 段按体积升序
+        val p2 = sorted.filter { DatapackImportOrder.group(it) == 2 }
+        val p2Bytes = p2.map { name -> entries.first { it.first == name }.third }
+        check("P2 段按体积升序（小表先完成，进度条动得快）",
+            p2Bytes.zipWithNext().all { (a, b) -> a <= b }, "体积序列前 8 项=${p2Bytes.take(8)}")
+        check("清单里 66 张表都排进去了", sorted.size == 66)
+    }
+
+    section("在线同步顺序：卡牌 / 歌曲在前，卡池垫底")
+
+    check("卡牌模块优先级最高", DataModule.CARD.syncPriority < DataModule.MUSIC.syncPriority)
+    check("歌曲排第二（高于角色/活动）",
+        DataModule.MUSIC.syncPriority < DataModule.CHARACTER.syncPriority &&
+            DataModule.MUSIC.syncPriority < DataModule.EVENT.syncPriority)
+    check("卡池优先级最低（44 MB 且只在家首页看一眼）",
+        DataModule.GACHA.syncPriority > DataModule.EVENT.syncPriority &&
+            DataModule.GACHA.syncPriority > DataModule.STICKER.syncPriority)
+
+    check("默认模块包含卡牌", DataModule.CARD in SyncManager.DEFAULT_MODULES)
+    check("默认模块不包含卡池（体积太大，要用户自己勾）", DataModule.GACHA !in SyncManager.DEFAULT_MODULES)
+
+    val defaultSpecs = TableCatalog.forModules(SyncManager.DEFAULT_MODULES)
+        .sortedWith(compareBy({ it.module.syncPriority }, { it.approxBytes }))
+    check("默认模块同步时第一张表属于卡牌", defaultSpecs.first().module == DataModule.CARD, "实际=${defaultSpecs.first().fileName}")
+    check("默认模块里不会出现卡池的表", defaultSpecs.none { it.module == DataModule.GACHA })
+    check("同模块内按体积升序（小表先落地）",
+        defaultSpecs.filter { it.module == DataModule.MUSIC }
+            .map { it.approxBytes }
+            .zipWithNext().all { (a, b) -> a <= b })
+
+    section("素材线路：卡面与音频走镜像，剧情仍走官方")
+
+    val jp = ServerRegion.JP
+    check("卡面 URL 用镜像 host",
+        AssetUrls.cardImage(jp, "res001_no004", trained = false).startsWith("https://storage.exmeaning.com/"),
+        AssetUrls.cardImage(jp, "res001_no004", trained = false))
+    check("卡面大图也用镜像",
+        AssetUrls.cardImage(jp, "res001_no004", trained = true, size = AssetUrls.CardSize.LARGE)
+            .startsWith("https://storage.exmeaning.com/"))
+    check("卡面原图（保存用 png）用镜像且是 .png",
+        AssetUrls.cardImagePng(jp, "res001_no004", trained = false)
+            .let { it.startsWith("https://storage.exmeaning.com/") && it.endsWith(".png") })
+    check("卡面小图标用镜像",
+        AssetUrls.cardIcon(jp, "res001_no004", trained = false).startsWith("https://storage.exmeaning.com/"))
+    check("预览 URL 与直连一致（不再经过缩放代理）",
+        AssetUrls.cardPreview(jp, "res001_no004", trained = false) ==
+            AssetUrls.cardImage(jp, "res001_no004", trained = false))
+    check("音频用镜像的 jp 桶",
+        AssetUrls.musicAudio("0001_01").startsWith("https://storage.exmeaning.com/sekai-jp-assets/music/long/"),
+        AssetUrls.musicAudio("0001_01"))
+    check("短版音频同样走镜像",
+        AssetUrls.musicAudio("0001_01", short = true).contains("/music/short/"))
+    check("播放器封面（固定 jp）走镜像",
+        AssetUrls.musicJacketJp("jacket_s_001").startsWith("https://storage.exmeaning.com/"))
+    // ⚠️ 镜像实测**没有**剧情 .asset（404），所以剧情必须留在官方
+    check("★ 剧情资源仍然走官方 host（镜像没有这些文件）",
+        AssetUrls.storyScenario(jp, StoryAssetKind.EVENT, "event_afterfire_2026", "event_216_01")
+            .startsWith("https://storage.sekai.best/"),
+        AssetUrls.storyScenario(jp, StoryAssetKind.EVENT, "event_afterfire_2026", "event_216_01"))
+    check("抽卡语音仍然走官方（未纳入镜像范围）",
+        AssetUrls.gachaVoice(jp, "res001_no004").startsWith("https://storage.sekai.best/"))
+
+    section("首次启动：条件请求种子的日期格式")
+
+    checkEq("ISO → HTTP 日期", isoToHttpDate("2026-09-13T15:00:14Z"), "Sun, 13 Sep 2026 15:00:14 GMT")
+    checkEq("带毫秒的 ISO 也能转", isoToHttpDate("2026-09-14T15:54:01.406143Z"), "Mon, 14 Sep 2026 15:54:01 GMT")
+    checkEq("解析不了就返回 null（宁可不省流量，也不发畸形头）", isoToHttpDate("不是日期"), null)
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))

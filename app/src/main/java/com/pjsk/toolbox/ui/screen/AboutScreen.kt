@@ -90,13 +90,20 @@ fun AboutScreen(onBack: () -> Unit) {
             BodyLines(
                 "Master data：Sekai-World/sekai-master-db-diff，日服",
                 "中文名叠加：Sekai-World/sekai-master-db-cn-diff，简中服",
-                "素材 CDN：storage.sekai.best",
+                "素材 CDN（卡面 / 音频）：storage.exmeaning.com —— 第三方社区镜像",
+                "素材 CDN（剧情等）：storage.sekai.best —— 官方",
                 "版本探测：api.github.com",
             )
             Body(
                 "这些是社区维护的公开数据仓库，不是官方接口。" +
                     "其中两个数据仓库本身没有 LICENSE 文件，严格来说数据并未被明确授予再分发许可，" +
                     "自用风险较低，但若要公开发布或再分发数据，请自行评估。",
+            )
+            Body(
+                "为什么卡面与音频走镜像：官方素材 CDN 在国内实测只有 5–40 KB/s（首字节要 1–7 秒），" +
+                    "镜像能达到 500 KB/s 以上，同一份素材、路径完全一致。" +
+                    "镜像是别人提供免费服务，随时可能停止 —— 一旦请求失败，App 会自动改回官方地址重试，" +
+                    "所以镜像不可用时只会变慢，不会打不开。",
             )
 
             Section("数据实时性")

@@ -2,6 +2,7 @@ package com.pjsk.toolbox.data.sync
 
 import com.pjsk.toolbox.data.db.AppDatabase
 import com.pjsk.toolbox.data.db.MasterRowEntity
+import android.util.Log
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import java.io.File
@@ -43,6 +44,8 @@ class MasterImporter(private val db: AppDatabase) {
         val schema = TableSchemas[tableName]
         var count = 0
         val batch = ArrayList<MasterRowEntity>(BATCH_SIZE)
+        val started = System.nanoTime()
+        var insertNanos = 0L
 
         dao.deleteTableBlocking(tableName)
 
@@ -73,15 +76,28 @@ class MasterImporter(private val db: AppDatabase) {
             count++
 
             if (batch.size >= BATCH_SIZE) {
+                val t = System.nanoTime()
                 dao.insertRowsBlocking(batch.toList())
+                insertNanos += System.nanoTime() - t
                 batch.clear()
                 onProgress(count)
             }
         }
         if (batch.isNotEmpty()) {
+            val t = System.nanoTime()
             dao.insertRowsBlocking(batch.toList())
+            insertNanos += System.nanoTime() - t
         }
         onProgress(count)
+
+        val totalMs = (System.nanoTime() - started) / 1_000_000
+        if (totalMs >= SLOW_LOG_MS) {
+            Log.i(
+                TAG,
+                "$tableName 导入较慢：$count 行 / ${totalMs}ms" +
+                    "（其中入库 ${insertNanos / 1_000_000}ms，其余是 JSON 解析与字段裁剪）",
+            )
+        }
         return count
     }
 
@@ -109,6 +125,13 @@ class MasterImporter(private val db: AppDatabase) {
         val schema = TableSchemas[tableName]
         var matched = 0
         val batch = ArrayList<Pair<Int, String>>(OVERLAY_BATCH_SIZE)
+        val started = System.nanoTime()
+
+        // ⚠️ 这里原来是**逐行** `dao.existsBlocking(tableName, id)`，也就是每写一个中文名
+        // 先查一次库（简中名共 8,168 条 → 8 千次 SELECT），而叠加层本来就不该是瓶颈。
+        // 现在一次性把这张表的 id 读进内存（最多几千个 Int），再在内存里判断，
+        // 语义不变（仍然只更新确实存在的行，避免为简中独有的 id 造孤儿数据），查询次数从 N 降到 1。
+        val existingIds = dao.allIdsBlocking(tableName).toHashSet()
 
         fun flush() {
             if (batch.isEmpty()) return
@@ -126,7 +149,7 @@ class MasterImporter(private val db: AppDatabase) {
             val zh = schema.extractOverlayName(obj) ?: return@forEachElement
 
             // 只更新确实存在的行，避免为简中独有的 id 产生孤儿数据
-            if (dao.existsBlocking(tableName, id) == 0) return@forEachElement
+            if (id !in existingIds) return@forEachElement
 
             batch += id to zh
             matched++
@@ -137,6 +160,11 @@ class MasterImporter(private val db: AppDatabase) {
         }
         flush()
         onProgress(matched)
+
+        val totalMs = (System.nanoTime() - started) / 1_000_000
+        if (totalMs >= SLOW_LOG_MS) {
+            Log.i(TAG, "$tableName 中文名叠加较慢：$matched 条 / ${totalMs}ms")
+        }
         return matched
     }
 
@@ -148,6 +176,11 @@ class MasterImporter(private val db: AppDatabase) {
     fun isLargeOverlay(fileSizeBytes: Long): Boolean = fileSizeBytes > LARGE_OVERLAY_THRESHOLD
 
     private companion object {
+        const val TAG = "MasterImporter"
+
+        /** 单张表（或它的中文名叠加）超过这个耗时就打一行日志，方便定位首次打开的耗时来源。 */
+        const val SLOW_LOG_MS = 400L
+
         const val BATCH_SIZE = 500
         const val OVERLAY_BATCH_SIZE = 500
         const val LARGE_OVERLAY_THRESHOLD = 8L * 1024 * 1024

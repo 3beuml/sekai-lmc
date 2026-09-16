@@ -10,14 +10,17 @@ import com.pjsk.toolbox.data.settings.AppSettings
 import com.pjsk.toolbox.data.player.MusicPlayer
 import com.pjsk.toolbox.data.player.MusicPlayerFactory
 import com.pjsk.toolbox.data.remote.MasterRepository
+import com.pjsk.toolbox.data.remote.MirrorFallbackInterceptor
 import com.pjsk.toolbox.data.sync.BundledPack
 import com.pjsk.toolbox.data.sync.BundledState
 import com.pjsk.toolbox.data.sync.MasterImporter
 import com.pjsk.toolbox.data.sync.SyncManager
 import com.pjsk.toolbox.data.story.StoryRepository
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -49,6 +52,9 @@ class AppContainer(private val context: Context) {
         .readTimeout(60, TimeUnit.SECONDS)
         .callTimeout(180, TimeUnit.SECONDS) // 54 MB 的表在慢网上需要更久
         .followRedirects(true)
+        // 卡面与音频默认走镜像站（见 AssetUrls.MIRROR_HOST 的实测数据）；
+        // 镜像挂了或那边缺文件时，这一层自动改回官方 CDN 重试一次。
+        .addInterceptor(MirrorFallbackInterceptor())
         .build()
 
     val database: AppDatabase by lazy { AppDatabase.build(appContext) }
@@ -131,15 +137,13 @@ class AppContainer(private val context: Context) {
 
     /** 内置数据快照（打包在 APK 的 assets 里）。 */
     val bundledPack: BundledPack by lazy {
-        BundledPack(appContext, database, masterImporter)
+        BundledPack(appContext, database, masterImporter, masterRepository)
     }
 
     private val _bundledState = MutableStateFlow<BundledState>(BundledState.Unknown)
 
     /** 内置快照的导入进度。首页据此显示一条不打扰的提示。 */
     val bundledState: StateFlow<BundledState> = _bundledState.asStateFlow()
-
-    private var bundledInstallStarted = false
 
     /**
      * 启动时调用一次：需要的话在**后台**把内置快照导进本地数据库。
@@ -166,6 +170,18 @@ class AppContainer(private val context: Context) {
         if (autoSyncStarted) return
         autoSyncStarted = true
         scope.launch {
+            // ⚠️ **必须等内置导入结束再同步**。原来这两个是并行启动的，后果是：
+            // 同步第一步做版本比对时，内置导入还没写版本号（它只在**导入结束时**才写），
+            // 于是判定「数据不是最新」→ 把刚刚才从 APK 导进去的那十来 MB 又从网上完整下载一遍
+            // 再重新导入一次。内置数据**故意不写 ETag**（见 BundledPack.install），
+            // 所以那一轮连一个 304 都命中不了 —— 用户看到的就是「第一次打开同步半天」。
+            //
+            // 串起来之后：导入完成 → 版本号已写好 → 下面的 runSync 走
+            // 「数据已是最新（master version …），本次未下载任何文件」分支 → **首次启动零下载**。
+            // 保证内置导入一定先跑：即使将来有人把两个方法的调用顺序写反了，
+            // 这里也会自己把导入任务建起来，而不会退化成「不等导入就同步」。
+            val install = bundledInstallJob ?: ensureBundledDataInstalled(scope)
+            runCatching { install.await() }
             runCatching {
                 syncManager.runSync(
                     wifiOnly = false,
@@ -175,46 +191,60 @@ class AppContainer(private val context: Context) {
         }
     }
 
-    fun ensureBundledDataInstalled(scope: CoroutineScope) {
-        if (bundledInstallStarted) return
-        bundledInstallStarted = true
-        scope.launch {
-            val pack = bundledPack
-            if (!pack.isBundled) {
-                // 开发期可能没跑 tools/datapack/build.ps1，这时退回在线同步即可
-                _bundledState.value = BundledState.NotBundled
-                return@launch
-            }
-            if (!pack.needsInstall()) {
-                _bundledState.value = BundledState.Ready
-                return@launch
-            }
-            _bundledState.value = BundledState.Installing(0, 0, "")
-            val result = runCatching {
-                pack.install { done, total, table ->
-                    _bundledState.value = BundledState.Installing(done, total, table)
-                }
-            }
-            _bundledState.value = result.fold(
-                onSuccess = {
-                    // ⚠️ **单张表导入失败原来是完全静默的**：`BundledPack.failures` 只是记着，
-                    // 没有任何地方显示。结果是某张表（unitStories）几轮都导不进去、
-                    // 对应界面整块空白，却只有去翻「全部数据表」才看得到「未下载」。
-                    // 现在把失败一并报出来，走首页那条现成的失败横幅。
-                    val failed = pack.failures.toList()
-                    if (failed.isNotEmpty()) {
-                        BundledState.Failed(
-                            "有 ${failed.size} 张表导入失败（对应界面会是空的）：" +
-                                failed.joinToString("；") { it.take(80) },
-                        )
-                    } else {
-                        BundledState.Ready
-                    }
-                },
-                onFailure = {
-                    BundledState.Failed(it.message ?: it::class.simpleName ?: "未知错误")
-                },
-            )
+    private var bundledInstallJob: Deferred<Unit>? = null
+
+    /**
+     * 需要的话在**后台**把内置快照导进本地数据库，并返回这个任务的句柄。
+     *
+     * 刻意不阻塞任何界面：首页照常渲染，导入完成的表会通过 Room 的 Flow 自动填充到列表上。
+     * 所以用户看到的是「打开就有内容」，而不是「请稍候，正在准备数据」。
+     *
+     * 返回 [Deferred] 是为了让 [autoSyncOnStart] 能等它结束（见那里的说明）——
+     * 这也是「首次打开不做冗余下载」的关键。
+     */
+    fun ensureBundledDataInstalled(scope: CoroutineScope): Deferred<Unit> {
+        bundledInstallJob?.let { return it }
+        val job = scope.async { installBundledData() }
+        bundledInstallJob = job
+        return job
+    }
+
+    private suspend fun installBundledData() {
+        val pack = bundledPack
+        if (!pack.isBundled) {
+            // 开发期可能没跑 tools/datapack/build.ps1，这时退回在线同步即可
+            _bundledState.value = BundledState.NotBundled
+            return
         }
+        if (!pack.needsInstall()) {
+            _bundledState.value = BundledState.Ready
+            return
+        }
+        _bundledState.value = BundledState.Installing(0, 0, "")
+        val result = runCatching {
+            pack.install { done, total, table ->
+                _bundledState.value = BundledState.Installing(done, total, table)
+            }
+        }
+        _bundledState.value = result.fold(
+            onSuccess = {
+                // ⚠️ **单张表导入失败原来是完全静默的**：`BundledPack.failures` 只是记着，
+                // 没有任何地方显示。结果是某张表（unitStories）几轮都导不进去、
+                // 对应界面整块空白，却只有去翻「全部数据表」才看得到「未下载」。
+                // 现在把失败一并报出来，走首页那条现成的失败横幅。
+                val failed = pack.failures.toList()
+                if (failed.isNotEmpty()) {
+                    BundledState.Failed(
+                        "有 ${failed.size} 张表导入失败（对应界面会是空的）：" +
+                            failed.joinToString("；") { it.take(80) },
+                    )
+                } else {
+                    BundledState.Ready
+                }
+            },
+            onFailure = {
+                BundledState.Failed(it.message ?: it::class.simpleName ?: "未知错误")
+            },
+        )
     }
 }

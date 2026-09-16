@@ -55,6 +55,10 @@ class PjskApp : Application(), ImageLoaderFactory {
      */
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
+            // ⚠️ 用**共享的** OkHttpClient：卡面/曲绘现在默认走镜像站，而
+            // 「镜像挂了自动改回官方」是靠 AppContainer 里装的那个 MirrorFallbackInterceptor
+            // 实现的 —— Coil 自己那份默认 client 装不到它，镜像一出问题卡面就会整块空掉。
+            .okHttpClient { container.httpClient }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
