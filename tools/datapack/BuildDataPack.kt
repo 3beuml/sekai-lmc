@@ -1,4 +1,5 @@
 import com.pjsk.toolbox.data.remote.TableCatalog
+import com.pjsk.toolbox.data.sync.ContentSha
 import com.pjsk.toolbox.data.sync.JsonArrayStreamer
 import com.pjsk.toolbox.data.sync.RowProjectors
 import com.pjsk.toolbox.data.sync.TableSchemas
@@ -59,8 +60,30 @@ fun main(args: Array<String>) {
 
     val tableEntries = mutableListOf<JsonObject>()
     val skipped = mutableListOf<JsonObject>()
+    val shaMismatch = mutableListOf<String>()
     var totalRows = 0L
     var totalOverlayRows = 0L
+
+    // 每张表在上游仓库里的 blob sha（由 fetch-raw.mjs 从 git trees API 取来写进 raw/_shas.json）。
+    //
+    // 为什么要写进快照：App 首次导入内置数据后，就**知道手里这份对应上游哪个 sha**，
+    // 于是首次在线同步只要取一次仓库树（1 个请求）就能判断「有没有更新」，
+    // 既不用把十几 MB 重新下一遍，也能在下载后校验内容对不对（见 MasterRepository）。
+    val shasFile = File(rawDir, "_shas.json")
+    val shas: Map<String, String> = if (shasFile.isFile) {
+        val obj = runCatching {
+            lenientJson.parseToJsonElement(shasFile.readText()) as? JsonObject
+        }.getOrNull()
+        obj?.entries?.mapNotNull { (k, v) ->
+            (v as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { k to it }
+        }?.toMap().orEmpty()
+    } else {
+        emptyMap()
+    }
+    if (shas.isEmpty()) {
+        println("⚠️ 没找到 raw/_shas.json（先跑 fetch-raw.mjs）——快照将不带 sha，" +
+            "App 首次同步会把所有表重新下一遍。\n")
+    }
 
     for (spec in TableCatalog.ALL) {
         val rawFile = File(rawDir, spec.fileName)
@@ -70,6 +93,24 @@ fun main(args: Array<String>) {
                 put("reason", "源数据未下载（tools/datapack/raw/ 里没有这个文件）")
             }
             continue
+        }
+
+        // ── 0. 先确认「本地这份源数据」就是「记录的那份」──
+        // 对不上就**中止打包**（不是跳过）。理由：manifest 里记的是上游的 sha，
+        // 如果本地内容其实更旧，快照就会"谎报"自己是最新的 —— App 之后判定"sha 一致"，
+        // 于是那几张表**永远不会被更新**。这正是我们刚踩过的坑：
+        // GACHA 模块的源数据是几天前抓的，而重抓时没带 gacha 模块，两边就此对不上。
+        val expectedSha = shas[spec.fileName]
+        if (expectedSha != null) {
+            val actual = ContentSha.of(rawFile)
+            if (actual != expectedSha) {
+                shaMismatch += spec.fileName
+                skipped += buildJsonObject {
+                    put("file", spec.fileName)
+                    put("reason", "源数据与上游 sha 不一致（本地 ${actual.take(8)} / 上游 ${expectedSha.take(8)}），先重跑 fetch-raw.mjs")
+                }
+                continue
+            }
         }
 
         val projector = RowProjectors.forFile(spec.fileName)
@@ -147,6 +188,8 @@ fun main(args: Array<String>) {
             put("projected", projector != null)
             put("hasOverlay", hasOverlay)
             put("overlayRows", overlayRows)
+            // 上游仓库里这份源数据的 blob sha（App 用它判断"有没有更新"与"下到的是不是这份"）
+            shas[spec.fileName]?.let { put("sha", it) }
         }
         println(
             "  %-34s %6d 行  %8s → %8s%s".format(
@@ -195,6 +238,15 @@ fun main(args: Array<String>) {
         skipped.forEach { s ->
             println("    ${s["file"]?.toString()?.trim('"')}  ← ${s["reason"]?.toString()?.trim('"')}")
         }
+    }
+
+    // 源数据与上游 sha 对不上 → 这份快照不可信，**必须让构建失败**，不能悄悄产出
+    if (shaMismatch.isNotEmpty()) {
+        println("\n✗ 有 ${shaMismatch.size} 张表的源数据与上游 sha 不一致：" +
+            shaMismatch.joinToString(", "))
+        println("  这些表的内容是旧的，但 manifest 会记成上游最新的 sha —— App 会因此永远不更新它们。")
+        println("  先重跑抓取（node tools/datapack/fetch-raw.mjs <模块...>）再打包。")
+        kotlin.system.exitProcess(1)
     }
 }
 

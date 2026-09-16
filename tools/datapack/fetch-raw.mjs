@@ -92,6 +92,16 @@ function gitBlobSha(buf) {
 
 const treeShas = await fetchTreeShas();
 
+// 把 sha 表落盘，交给打包器写进 manifest.json。
+// 为什么必须带进快照：App 首次导入内置数据后就**知道手里这份对应上游哪个 sha**，
+// 于是首次在线同步只比对 sha（1 次请求）就知道有没有更新，不必把表重新下一遍；
+// 也正因为有了它，"下载到的内容对不对"才校验得起来（见 MasterRepository 里的说明）。
+if (Object.keys(treeShas).length > 0) {
+  const shasPath = new URL('_shas.json', outDir);
+  writeFileSync(shasPath, JSON.stringify(treeShas, null, 2), 'utf8');
+  console.log(`  已写出 ${Object.keys(treeShas).length} 条文件 sha → _shas.json`);
+}
+
 /** 并发下载；失败重试一次（GitHub Pages 偶发 5xx）。 */
 async function grab(spec) {
   const dest = new URL(spec.file, outDir);

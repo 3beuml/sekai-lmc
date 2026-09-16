@@ -21,8 +21,8 @@ tools/
 
 ## datapack/ —— 内置数据快照
 
-App 首次启动要能离线导入，靠的是 `app/src/main/assets/datapack/` 里的裁剪快照（66 张表 / 3.4 万行 / 约 12 MB）。
-重新生成（游戏大版本更新后）：
+App 首次启动要能离线导入，靠的是 `app/src/main/assets/datapack/` 里的裁剪快照（66 张表 / 3.4 万行 / 约 12.7 MB）。
+重新生成（**每次发新 Release 前都跑一遍**）：
 
 ```powershell
 node tools/datapack/fetch-raw.mjs character music event sticker card gacha
@@ -30,8 +30,21 @@ node tools/datapack/fetch-cn-overlay.mjs character music event sticker card gach
 powershell -File tools/datapack/build.ps1
 ```
 
-`raw/`（日服源数据，约 93 MB）与 `cn/`（简中服，用于中文名叠加）都在 gitignore 里，
+`raw/`（日服源数据，约 46 MB）与 `cn/`（简中服，用于中文名叠加）都在 gitignore 里，
 随时可以重新下载；**打包好的快照本身要提交**，这样新克隆的人不下载源数据也能直接构建。
+
+### ⚠️ 两条防线（都踩过坑之后加的，别绕过）
+
+1. **抓取按仓库 blob sha 核对**（`fetch-raw.mjs` / `fetch-cn-overlay.mjs`）。
+   GitHub Pages 前面是 Fastly 缓存，裸 `fetch` 可能拿到**部署前的旧副本** —— 真实事故：
+   09-13 的版本提交之后 6.5 小时抓取，19 张表（含卡牌、歌曲）全是旧的，而体积只差 0.4%，
+   靠比大小完全发现不了。现在按内容哈希逐个核对（差一个字节都能发现），且下载带 `?cb=` 绕过缓存。
+2. **打包器拒绝 sha 不一致的源数据**（`BuildDataPack.kt`）。
+   manifest 里记的是上游 sha，如果本地内容更旧，快照就会"谎报"自己是最新的，
+   App 之后判定"sha 一致"于是**永远不会更新那几张表**。所以对不上就直接让构建失败。
+
+跑完打包后建议再跑一次 `tools/logic-check.ps1`：里面有一条端到端断言，
+会用 App 里那份算法把每张源数据的 sha 重算一遍，与 manifest 记录比对。
 
 ## probes/ —— 一次性探测
 

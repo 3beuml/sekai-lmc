@@ -7,24 +7,33 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import com.pjsk.toolbox.data.sync.ContentSha
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.IOException
 
 /**
- * 负责「与远端 master data 交互」：版本探测 + 条件下载。
+ * 负责「与远端 master data 交互」：版本探测（用于界面显示）+ 按内容 sha 下载与校验。
  *
  * 远端事实（全部实测确认）：
  *  - 数据文件：`https://sekai-world.github.io/sekai-master-db<region>-diff/<file>.json`
- *  - 版本号藏在最新 commit 的 message 里：
- *      GET https://api.github.com/repos/Sekai-World/sekai-master-db-diff/commits?per_page=1
+ *  - 版本号藏在**往回若干条** commit 的 message 里（机器人每天推的提交没有版本号）：
+ *      GET https://api.github.com/repos/Sekai-World/sekai-master-db-diff/commits?per_page=20
  *      → commit.message = "master version 6.7.0.40 asset version 6.7.0.40"
- *  - 条件请求：GitHub Pages 返回 ETag / Last-Modified，命中 304 就完全不用下载。
+ *  - 仓库里每个文件的 blob sha：
+ *      GET https://api.github.com/repos/Sekai-World/sekai-master-db-diff/git/trees/main?recursive=1
+ *      → 一次请求拿到全部文件（实测 398 个、未被截断）——**这是判断"有没有更新"的权威依据**
  *
- * ⚠️ GitHub 的 commits API 在**未鉴权**情况下限速 60 次/小时/IP。
- *    所以 [probeVersion] 只应在用户手动点击「检查更新」或一次完整同步的开头调用一次，
- *    绝不要放进循环或做成定时轮询。
+ * ⚠️ **判断更新与校验内容一律用 blob sha，不要用 ETag / Last-Modified / 版本号**：
+ *  - Pages 前面是 Fastly 缓存（max-age=600）。我们踩过一次真坑：版本提交之后 6.5 小时抓取，
+ *    仍拿到部署前的旧副本（少 5 张卡、2 首歌），而体积只差 0.4%，比大小根本发现不了；
+ *  - trees API 是**仓库直读、不过缓存**，所以"上游有没有新提交"是立即准确的；
+ *  - 下载时带 `?cb=<时间戳>` 绕过 CDN 缓存，下完再算一遍 sha 与期望值比对，
+ *    不一致就不覆盖本地数据 —— 这样"旧副本污染本地数据"在原理上就不可能发生。
+ *
+ * ⚠️ GitHub 的 API 在**未鉴权**情况下限速 60 次/小时/IP，所以一次同步只调：
+ *    ① [probeVersion] 一次（拿版本号显示用，可选）② [fetchTreeShas] 一次。绝不要放进循环。
  */
 class MasterRepository(
     private val client: OkHttpClient,
@@ -45,7 +54,7 @@ class MasterRepository(
     }
 
     sealed interface DownloadResult {
-        /** 304：远端未变化。 */
+        /** 304：远端未变化（保留给条件请求路径，正常流程不走这条）。 */
         data object NotModified : DownloadResult
 
         data class Downloaded(
@@ -54,6 +63,14 @@ class MasterRepository(
             val etag: String?,
             val lastModified: String?,
         ) : DownloadResult
+
+        /**
+         * 内容 sha 与仓库里的对不上 —— **绝不能入库**。
+         *
+         * 成因通常是 CDN 还在给部署前的旧副本（或下载被中途截断）。
+         * 调用方应带新的 `?cb=` 再试一次；仍不一致就报错并保留本地旧数据。
+         */
+        data class ShaMismatch(val expected: String, val actual: String) : DownloadResult
 
         data class Failed(val message: String, val code: Int? = null) : DownloadResult
     }
@@ -67,32 +84,83 @@ class MasterRepository(
 
     private fun etagFileOf(cached: File): File = File(cached.parentFile, "${cached.name}.etag")
 
-    /**
-     * 内置快照导入后留下的「条件请求种子」文件（内容是 HTTP 日期）。
-     *
-     * 存在的理由：内置快照导入的表**故意不写 ETag**（快照里没有条件请求凭据），
-     * 于是首次在线同步时每一张表都只能完整重下 —— 实测默认模块就有 10.6 MB。
-     * 但快照里记着**它的数据版本对应的 commit 时间**，而 GitHub Pages 实测支持
-     * `If-Modified-Since`（返回 304），所以用它做一次条件请求：
-     * 快照之后**没变过的表直接 304**，只有真变过的才会下载。
-     *
-     * ⚠️ 种子的取值**刻意偏保守**（用版本 commit 时间，而不是快照生成时间）：
-     * 偏旧最多导致「本来可以跳过的表也下一遍」（多花流量但结果正确），
-     * 偏新则会**漏掉更新**（收到 304 却拿着旧数据），那才是必须避免的。
-     */
-    private fun sinceFileOf(cached: File): File = File(cached.parentFile, "${cached.name}.since")
+    // ── 内容 sha：判断「有没有更新」与「下到的是不是那份」的权威判据 ────────
+    //
+    // 为什么不用版本号或 ETag 判断更新：
+    //  - **版本号**只在游戏大版本时跳（约每周），而表的内容可能在两次版本号之间被改
+    //    （不过实测真正影响我们的表都是跟版本提交一起变的）；
+    //  - **ETag / Last-Modified 来自 GitHub Pages，前面是 Fastly 缓存**：我们踩过一次真坑 ——
+    //    09-13 的版本提交之后 6.5 小时抓取，仍拿到部署前的旧副本（少了 5 张卡、2 首歌），
+    //    而且体积只差 0.4%，靠比大小根本发现不了。
+    //
+    // 所以：**判定与校验都用仓库的 blob sha**（内容哈希，差一个字节都对不上）。
+    // git trees API 是仓库直读、不经过 Pages 缓存，所以"上游有没有新提交"是立即准确的；
+    // 下载时再带 `?cb=<时间戳>` 绕过 CDN 缓存，下完算一遍 sha 对不上就重试/放弃。
+
+    private fun shaFileOf(cached: File): File = File(cached.parentFile, "${cached.name}.sha")
+
+    /** 本地记录的「当前这份内容对应上游哪个 sha」。没有记录（例如旧版本升上来的库）时返回 null。 */
+    fun readContentSha(region: ServerRegion, fileName: String): String? =
+        shaFileOf(cachedFile(region, fileName)).takeIf { it.isFile }?.readText()?.trim()?.ifBlank { null }
 
     /**
-     * 给某个区服的某张表写入条件请求种子（[httpDate] 必须是 HTTP 日期格式，
-     * 例如 `Sun, 13 Sep 2026 15:00:14 GMT`）。由内置快照导入时调用。
+     * 记下某张表当前内容对应的上游 sha。
+     *
+     * 两条来源：① 下载并校验通过之后；② **内置快照导入时**（sha 写在快照的 manifest 里）——
+     * 后者让「全新安装后的首次同步」也能直接判定为「无更新」，一个字节都不用下。
      */
-    fun seedModifiedSince(region: ServerRegion, fileName: String, httpDate: String) {
+    fun seedContentSha(region: ServerRegion, fileName: String, sha: String) {
         runCatching {
             val cached = cachedFile(region, fileName)
             cached.parentFile?.mkdirs()
-            sinceFileOf(cached).writeText(httpDate)
+            shaFileOf(cached).writeText(sha)
         }
     }
+
+    /**
+     * 取上游仓库里每个文件的 blob sha（1 个请求、无 CDN 缓存）。
+     *
+     * 失败（限速、断网、响应被截断）时返回 [Result.failure]：调用方**必须**把它当成
+     * 「无法确认是否有更新」，而不是「没有更新」—— 前者只是这次不更新，后者会让数据永远停在旧版本。
+     */
+    suspend fun fetchTreeShas(region: ServerRegion): Result<Map<String, String>> =
+        withContext(Dispatchers.IO) {
+            val url = "https://api.github.com/repos/Sekai-World/sekai-master-db${region.repoSuffix}" +
+                "/git/trees/main?recursive=1"
+            val request = Request.Builder()
+                .url(url)
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", USER_AGENT)
+                .build()
+            runCatching {
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("取仓库文件列表失败：HTTP ${response.code}")
+                    val root = json.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
+                    if (root["truncated"]?.jsonPrimitive?.content == "true") {
+                        // 截断意味着"没列到的表"不能当成不存在，这份列表不可信
+                        throw IOException("仓库文件列表被 GitHub 截断，本次不判断更新")
+                    }
+                    val map = HashMap<String, String>(512)
+                    root["tree"]?.jsonArray?.forEach { element ->
+                        val obj = element as? JsonObject ?: return@forEach
+                        if (obj["type"]?.jsonPrimitive?.content != "blob") return@forEach
+                        val path = obj["path"]?.jsonPrimitive?.content ?: return@forEach
+                        val sha = obj["sha"]?.jsonPrimitive?.content ?: return@forEach
+                        map[path] = sha
+                    }
+                    if (map.isEmpty()) throw IOException("仓库文件列表为空")
+                    map
+                }
+            }
+        }
+
+    /**
+     * 算一个文件的 **git blob sha**（`sha1("blob <字节数>\0" + 内容)`）。
+     *
+     * 与仓库里 `git hash-object` 的结果同算法，所以可以直接和 trees API 给的 sha 比。
+     * 注意长度用的是**字节数**：这个数据集里全是日文，按字符数算会全错。
+     */
+    fun gitBlobShaOf(file: File): String = ContentSha.of(file)
 
     /**
      * 探测远端数据版本。返回 [Result.failure] 时通常是限速或断网，调用方应把它当成
@@ -145,40 +213,30 @@ class MasterRepository(
     }
 
     /**
-     * 下载一张表。带条件请求；命中 304 直接返回 [DownloadResult.NotModified]。
-     * 先写 `.part` 临时文件，成功后再原子改名，避免留下半个损坏的 JSON 被当成有效缓存。
+     * 下载一张表，**并在写盘前校验内容 sha**。
      *
-     * @param forceFull 忽略本地 ETag，强制完整下载。
-     *   用于「本地数据库缺失但 ETag 还在」的情况（例如房间数据库被 destructive migration 重建过），
-     *   否则会收到 304 却没有任何数据可用。
+     * 流程：URL（必要时带 `?cb=` 绕过 CDN 缓存）→ 写到 `.part` → 算 git blob sha 与
+     * [expectedSha] 比对 → 一致才原子改名覆盖本地文件并记下 sha；不一致则删掉临时文件、
+     * 返回 [DownloadResult.ShaMismatch]，**本地已有数据完全不受影响**。
+     *
+     * @param expectedSha 期望的 sha（来自 [fetchTreeShas]）。为 null 时跳过校验（不建议）。
+     * @param cacheBust 是否带 `?cb=<时间戳>`。**内容已变化的表必须为 true**：
+     *   Pages 的 Fastly 缓存可能还在给部署前的旧副本，那正是"数据悄悄停在旧版本"的成因。
      */
     suspend fun downloadTable(
         region: ServerRegion,
         spec: TableSpec,
-        forceFull: Boolean = false,
+        expectedSha: String? = null,
+        cacheBust: Boolean = false,
         onProgress: (read: Long, total: Long) -> Unit,
     ): DownloadResult = withContext(Dispatchers.IO) {
         val cached = cachedFile(region, spec.fileName)
         val etagFile = etagFileOf(cached)
-        val previousEtag = etagFile.takeIf { it.isFile }?.readText()?.trim()?.ifBlank { null }
-        // 没有 ETag 时退回「快照种子」的 If-Modified-Since（见 sinceFileOf 的说明）
-        val previousSince = if (previousEtag != null) {
-            null
-        } else {
-            sinceFileOf(cached).takeIf { it.isFile }?.readText()?.trim()?.ifBlank { null }
-        }
-
+        val url = region.tableUrl(spec.fileName) +
+            if (cacheBust) "?cb=${System.currentTimeMillis()}" else ""
         val builder = Request.Builder()
-            .url(region.tableUrl(spec.fileName))
+            .url(url)
             .header("User-Agent", USER_AGENT)
-        // 注意：条件是「本地有 ETag」，而不是「本地有 JSON 文件」。
-        // 导入成功后我们会删掉 JSON 以省空间，但刻意保留 ETag —— 它很小，
-        // 而它正是让「已同步过的表零下载」得以成立的关键。
-        if (!forceFull && previousEtag != null) {
-            builder.header("If-None-Match", previousEtag)
-        } else if (!forceFull && previousSince != null) {
-            builder.header("If-Modified-Since", previousSince)
-        }
 
         try {
             client.newCall(builder.build()).execute().use { response ->
@@ -207,11 +265,27 @@ class MasterRepository(
                                 }
                             }
                         }
+
+                        // ⚠️ 写盘前先校验：这是「数据不会被旧副本/半截文件污染」的那道闸。
+                        if (read == 0L) {
+                            tmp.delete()
+                            return@use DownloadResult.Failed("下载到 0 字节（文件可能不存在）")
+                        }
+                        if (expectedSha != null) {
+                            val actual = gitBlobShaOf(tmp)
+                            if (actual != expectedSha) {
+                                tmp.delete()
+                                return@use DownloadResult.ShaMismatch(expected = expectedSha, actual = actual)
+                            }
+                        }
+
                         if (cached.isFile) cached.delete()
                         if (!tmp.renameTo(cached)) {
                             tmp.copyTo(cached, overwrite = true)
                             tmp.delete()
                         }
+                        // 记下这份内容对应的 sha：下次同步据此判断是否需要更新
+                        expectedSha?.let { shaFileOf(cached).writeText(it) }
                         val newEtag = response.header("ETag")
                         newEtag?.let { etagFile.writeText(it) } ?: etagFile.delete()
                         DownloadResult.Downloaded(

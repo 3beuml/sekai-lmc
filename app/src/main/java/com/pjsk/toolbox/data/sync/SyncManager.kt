@@ -183,8 +183,19 @@ class SyncManager(
     /**
      * 执行同步。
      *
+     * 判定逻辑是 **blob sha**（不是版本号，也不是 ETag）：
+     *  1. 取一次仓库文件列表（trees API，1 个请求、无 CDN 缓存）→ 每张表的权威 sha；
+     *  2. 与本地记的 sha 比：**一致的整张表跳过，一个请求都不发**；
+     *  3. 不一致的下载（带 `?cb=` 绕过 CDN 缓存）→ **写盘前校验 sha** → 通过才入库；
+     *  4. 全部通过才写「已同步到 XX 版本」；有失败就**不写**，下次启动继续补。
+     *
+     * 这套组合解决三个具体问题（都真实发生过）：
+     *  - 版本号相同但其实有表变化 → 现在按内容判定，不会漏；
+     *  - CDN 给了部署前的旧副本 → sha 对不上，不会覆盖本地数据（旧副本污染不了本地）；
+     *  - 拿到旧数据还被记成"已同步" → 只有全部校验通过才记版本，不会卡在旧版本。
+     *
      * @param wifiOnly 仅在不计流量的网络下执行（大表加起来可达上百 MB）。
-     * @param force 即使版本号未变化也强制走一遍条件请求；false 时版本一致会直接跳过。
+     * @param force 忽略 sha 一致这个快速跳过，强制把所有表重新核对/下载一遍。
      */
     suspend fun runSync(
         wifiOnly: Boolean,
@@ -220,38 +231,51 @@ class SyncManager(
         _state.value = _state.value.copy(running = true, currentTable = null)
         log("开始同步「${region.displayName}」，共 ${specs.size} 张表，约 ${TableCatalog.formatBytes(TableCatalog.totalBytes(modules))}。")
 
-        // 1) 版本探测（失败不阻断）
+        // 1) 版本探测：**只用于界面显示**（"数据版本 6.8.0.42"），判断更新不用它
         val info = repository.probeVersion(region).getOrNull()
         if (info != null) {
             _state.value = _state.value.copy(remoteVersion = info, versionChecked = true)
         }
 
-        // 2) 版本一致时快速跳过
-        val localVersion = db.versionStateDao().byRegion(region.id)?.masterVersion
-        val alreadySynced = db.syncStateDao().all()
-            .filter { it.region == region.id }
-            .map { it.tableName }
-            .toSet()
-        val allTablesPresent = specs.all { it.fileName in alreadySynced }
-        if (!force && info?.masterVersion != null && info.masterVersion == localVersion && allTablesPresent) {
-            log("数据已是最新（master version ${info.masterVersion}），本次未下载任何文件。")
-            // 同时也打到 logcat：这一条是「首次启动零下载」的关键判据，
-            // 只写在界面日志里的话，测冷启动时根本没法从外部确认它有没有生效。
-            Log.i(TAG, "同步跳过：master version ${info.masterVersion} 与本地一致且 ${specs.size} 张表都有记录，未下载任何文件")
-            _state.value = _state.value.copy(running = false, currentTable = null, localVersion = localVersion)
+        // 2) 取仓库文件列表（权威 sha）。失败就**不猜**：既不能当成"没有更新"，
+        //    也不能贸然全量重下（那会在限速时白白耗掉上百 MB）。
+        val remoteShas = repository.fetchTreeShas(region).getOrElse { error ->
+            val why = error.message ?: error::class.java.simpleName
+            log("无法获取远端文件列表（$why），本次跳过同步。数据保持原样，下次启动会再试。")
+            Log.i(TAG, "同步中止：取仓库树失败 —— $why")
+            _state.value = _state.value.copy(running = false, currentTable = null)
             return@withContext
         }
-        // 走到这里说明要真的下载了：把判据一并打出来，方便事后判断「它为什么决定下载」
-        Log.i(
-            TAG,
-            "开始同步：远端版本=${info?.masterVersion ?: "未探到"} 本地版本=${localVersion ?: "无"} " +
-                "选定表=${specs.size} 张 全部有记录=$allTablesPresent 强制=$force",
-        )
+        Log.i(TAG, "取到仓库文件列表：${remoteShas.size} 个文件，本次核对 ${specs.size} 张表")
+
+        // 3) 逐表判定 + 下载 + 导入（判定规则见 [SyncDecision]，有离线断言钉着）
+        val localVersion = db.versionStateDao().byRegion(region.id)?.masterVersion
 
         var failures = 0
+        var skipped = 0
+        var updated = 0
 
-        // 3) 逐表下载 + 导入
         for (spec in specs) {
+            val remoteSha = remoteShas[spec.fileName]
+            when (SyncDecision.decide(repository.readContentSha(region, spec.fileName), remoteSha, force)) {
+                SyncDecision.Action.SKIP_MISSING_REMOTE -> {
+                    // 仓库树里没有这张表：可能被上游删/改名了。不动本地数据，只记一笔。
+                    skipped++
+                    setPhase(spec, TableState(spec = spec, phase = Phase.SKIPPED, message = "远端已无此表"))
+                    log("${spec.fileName}：远端文件列表里没有它，已跳过（本地数据保持不变）。")
+                    continue
+                }
+
+                SyncDecision.Action.SKIP_UNCHANGED -> {
+                    skipped++
+                    val rows = db.syncStateDao().byTable(spec.fileName)?.rowCount ?: 0
+                    setPhase(spec, TableState(spec = spec, phase = Phase.NOT_MODIFIED, rows = rows))
+                    continue
+                }
+
+                SyncDecision.Action.DOWNLOAD -> Unit
+            }
+
             setPhase(spec, TableState(spec = spec, phase = Phase.DOWNLOADING))
             _state.value = _state.value.copy(currentTable = spec.fileName)
 
@@ -259,25 +283,47 @@ class SyncManager(
                 updateTable(spec) { it.copy(phase = Phase.DOWNLOADING, read = read, total = total) }
             }
 
-            var download = repository.downloadTable(region, spec, onProgress = progress)
-
-            // 一致性保护：收到 304 说明远端没变，但「本地 ETag 还在、数据库里却没这张表」
-            // 是可能发生的（例如数据库被 fallbackToDestructiveMigration 重建过）。
-            // 这种情况下必须忽略 ETag 强制重下，否则会误报「已是最新」而实际无数据可用。
-            if (download is MasterRepository.DownloadResult.NotModified) {
-                val local = db.syncStateDao().byTable(spec.fileName)
-                if (local == null || local.rowCount == 0) {
-                    log("${spec.fileName}：收到 304 但本地无数据，改为强制完整下载。")
-                    download = repository.downloadTable(region, spec, forceFull = true, onProgress = progress)
-                }
+            // 带 `?cb=` 绕过 CDN 缓存，最多试两次（第一次可能撞上仍在缓存的旧副本）
+            var download = repository.downloadTable(
+                region = region,
+                spec = spec,
+                expectedSha = remoteSha,
+                cacheBust = true,
+                onProgress = progress,
+            )
+            if (download is MasterRepository.DownloadResult.ShaMismatch) {
+                log("${spec.fileName}：内容 sha 对不上（多半是 CDN 旧副本），换一次请求重试…")
+                download = repository.downloadTable(
+                    region = region,
+                    spec = spec,
+                    expectedSha = remoteSha,
+                    cacheBust = true,
+                    onProgress = progress,
+                )
             }
 
             when (download) {
                 is MasterRepository.DownloadResult.NotModified -> {
+                    // 新流程不会发条件请求，所以正常走不到这里；真到了就当成"已是最新"
                     val rows = db.syncStateDao().byTable(spec.fileName)?.rowCount ?: 0
                     setPhase(spec, TableState(spec = spec, phase = Phase.NOT_MODIFIED, rows = rows))
-                    log("${spec.fileName}：远端未变化（304），已跳过。")
-                    continue
+                    skipped++
+                }
+
+                is MasterRepository.DownloadResult.ShaMismatch -> {
+                    failures++
+                    setPhase(
+                        spec,
+                        TableState(
+                            spec = spec,
+                            phase = Phase.FAILED,
+                            message = "内容校验未通过（CDN 可能仍在给旧副本）",
+                        ),
+                    )
+                    log(
+                        "${spec.fileName}：内容 sha 校验两次都没通过（期望 ${download.expected.take(8)}，" +
+                            "实得 ${download.actual.take(8)}）。**本地数据保持不变**，稍后再试。",
+                    )
                 }
 
                 is MasterRepository.DownloadResult.Failed -> {
@@ -289,7 +335,6 @@ class SyncManager(
                     log("${spec.fileName}：${download.message}")
                     continue
                 }
-
                 is MasterRepository.DownloadResult.Downloaded -> {
                     setPhase(
                         spec,
@@ -340,7 +385,9 @@ class SyncManager(
                         ),
                     )
                     // 入库成功即删除原始 JSON，避免长期占用上百 MB 空间
+                    // （`.sha` 与 `.etag` 会保留，它们让下次同步零请求）
                     repository.removeCached(region, spec.fileName)
+                    updated++
                     setPhase(
                         spec,
                         TableState(
@@ -363,8 +410,14 @@ class SyncManager(
             }
         }
 
-        // 4) 记录版本
-        if (info?.masterVersion != null) {
+        // 4) 记录版本 —— **只有一次都没失败才记**。
+        //
+        // 这一步以前是无条件的，后果很严重：只要有一张表拿到的还是 CDN 旧副本（或下载中断），
+        // 它也会把"已同步到新版本"写进去，于是之后每次启动都判定"版本一致"直接跳过，
+        // 数据就一直停在旧版本，直到下次版本号变化（约一周）。
+        // 现在：有失败就不写版本，下次启动会继续比对 sha 并把没同步好的表补上。
+        val allVerified = failures == 0
+        if (allVerified && info?.masterVersion != null) {
             db.versionStateDao().upsert(
                 VersionStateEntity(
                     region = region.id,
@@ -375,10 +428,20 @@ class SyncManager(
                 ),
             )
         }
+        Log.i(
+            TAG,
+            "同步结束：跳过 $skipped 张（sha 一致/远端无此表）、更新 $updated 张、失败 $failures 张" +
+                "；记录版本=${allVerified && info?.masterVersion != null}",
+        )
 
         log(
-            if (failures == 0) "同步完成 ✅ 全部表已就绪。"
-            else "同步结束，但有 $failures 张表失败（可直接重试，已成功的表会走 304 跳过）。",
+            when {
+                failures > 0 ->
+                    "同步结束：更新 $updated 张，跳过 $skipped 张，**$failures 张失败**。" +
+                        "失败的会在下次同步自动重试（已完成的表按 sha 跳过，不会重下）。"
+                updated > 0 -> "同步完成 ✅ 更新 $updated 张表，其余 $skipped 张内容未变（sha 一致，零请求）。"
+                else -> "数据已是最新：${specs.size} 张表的内容 sha 与远端完全一致，本次未下载任何文件。"
+            },
         )
         _state.value = _state.value.copy(
             running = false,

@@ -89,11 +89,10 @@ class BundledPack(
         val now = System.currentTimeMillis()
         val started = System.nanoTime()
 
-        // 快照的数据版本对应的 commit 时间 → 写进每张表的「条件请求种子」。
-        // 这样首轮在线同步用 If-Modified-Since 就能让没变过的表直接 304，
-        // 不必把刚导进去的十几 MB 又完整下载一遍（见 MasterRepository.sinceFileOf）。
-        val sinceDate = manifest.snapshot?.versionCommitAt?.let(::isoToHttpDate)
-
+        // 快照里每张表都带着**上游仓库的 blob sha**（打包时从 git trees API 取的）。
+        // 导入时把它种成本地的"当前内容 sha"，于是：
+        //  ① 首次在线同步只要取一次仓库树，就能判定「有没有更新」——全一致就一个字节都不下；
+        //  ② 万一以后某次下载拿到的内容 sha 对不上，也绝不会覆盖这份数据。
         entries.forEachIndexed { index, entry ->
             val fileName = entry.file ?: return@forEachIndexed
             onProgress(index, entries.size, fileName)
@@ -101,8 +100,8 @@ class BundledPack(
             // **表里已经有数据就跳过**：内置快照可能比用户在线同步过的数据旧，不能覆盖。
             // 判据同样是**数实际行数**（见 needsInstall 的说明：同步记录里的 rowCount 不可信）。
             if (db.masterDao().count(fileName) > 0) {
-                // 已经有数据的表也要补种子（否则它永远拿不到条件请求的优惠）
-                sinceDate?.let { repository.seedModifiedSince(ServerRegion.DEFAULT, fileName, it) }
+                // 已经有数据的表也要补 sha（否则它永远拿不到"零请求"的优惠）
+                entry.sha?.let { repository.seedContentSha(ServerRegion.DEFAULT, fileName, it) }
                 return@forEachIndexed
             }
 
@@ -133,9 +132,8 @@ class BundledPack(
             }
 
             // 记一条同步状态，让「数据同步」页能正确显示哪些模块已经有数据。
-            // ETag 故意留空：内置数据没有条件请求的凭据。
-            // 但我们会另外写一个「不早于快照 commit 时间」的种子文件，
-            // 让首轮同步能靠 If-Modified-Since 拿到 304（见上面 sinceDate）。
+            // ETag 留空（内置数据没有条件请求凭据），但**会写下 sha** ——
+            // 它才是判断"下次要不要更新"的依据（见上面 entry.sha 的说明）。
             db.syncStateDao().upsert(
                 SyncStateEntity(
                     tableName = fileName,
@@ -147,7 +145,7 @@ class BundledPack(
                     module = entry.module.orEmpty(),
                 ),
             )
-            sinceDate?.let { repository.seedModifiedSince(ServerRegion.DEFAULT, fileName, it) }
+            entry.sha?.let { repository.seedContentSha(ServerRegion.DEFAULT, fileName, it) }
 
             val ms = (System.nanoTime() - tableStarted) / 1_000_000
             if (ms >= SLOW_TABLE_LOG_MS) Log.i(TAG, "较慢的表：$fileName 用时 ${ms}ms")
@@ -206,6 +204,7 @@ class BundledPack(
                 module = obj.str("module"),
                 rows = obj.str("rows")?.toIntOrNull() ?: 0,
                 bytes = obj.str("bytes")?.toLongOrNull() ?: 0L,
+                sha = obj.str("sha"),
                 hasOverlay = obj.str("hasOverlay") == "true",
             )
         }
@@ -244,6 +243,8 @@ class BundledPack(
         val module: String?,
         val rows: Int,
         val bytes: Long,
+        /** 上游仓库里这份源数据的 blob sha（见 [MasterRepository.seedContentSha]）。 */
+        val sha: String?,
         val hasOverlay: Boolean,
     )
 
@@ -256,19 +257,6 @@ class BundledPack(
         const val SLOW_TABLE_LOG_MS = 400L
     }
 }
-
-/**
- * `2026-09-13T15:00:14Z` → `Sun, 13 Sep 2026 15:00:14 GMT`（HTTP 日期，`If-Modified-Since` 要求的格式）。
- *
- * 解析不了就返回 `null`，调用方据此**不发这个头** —— 宁可不省流量，也不要发一个格式非法的日期
- * 让服务器返回 400 或把条件请求判成不成立。
- *
- * 放在类外、且是 public，是为了能在 logic-check 里直接断言
- * （logic-check 是另一个编译单元，看不到 `internal` 成员）。
- */
-fun isoToHttpDate(iso: String): String? = runCatching {
-    DateTimeFormatter.RFC_1123_DATE_TIME.format(Instant.parse(iso).atZone(ZoneOffset.UTC))
-}.getOrNull()
 
 /** 内置快照的导入状态，供首页显示一条不打扰的进度提示。 */
 sealed interface BundledState {

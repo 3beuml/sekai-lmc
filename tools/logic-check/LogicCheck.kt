@@ -105,12 +105,13 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.DataModule
+import com.pjsk.toolbox.data.remote.MasterRepository
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.remote.TableCatalog
 import com.pjsk.toolbox.data.story.StoryAssetKind
 import com.pjsk.toolbox.data.sync.DatapackImportOrder
+import com.pjsk.toolbox.data.sync.SyncDecision
 import com.pjsk.toolbox.data.sync.SyncManager
-import com.pjsk.toolbox.data.sync.isoToHttpDate
 import java.io.File
 
 /**
@@ -1966,6 +1967,8 @@ fun main(args: Array<String>) {
     section("内置数据导入顺序：卡牌与歌曲最先")
 
     val packDir = "app/src/main/assets/datapack"
+    // 打包用的源数据目录（不随仓库分发，但开发机上一直有；缺了就跳过相关断言）
+    val rawDirForCheck = "tools/datapack/raw"
 
     check("cards.json 属于 P0", DatapackImportOrder.group("cards.json") == 0)
     check("musics.json 属于 P0", DatapackImportOrder.group("musics.json") == 0)
@@ -2082,11 +2085,61 @@ fun main(args: Array<String>) {
     check("抽卡语音仍然走官方（未纳入镜像范围）",
         AssetUrls.gachaVoice(jp, "res001_no004").startsWith("https://storage.sekai.best/"))
 
-    section("首次启动：条件请求种子的日期格式")
+    section("同步判定：按内容 sha，而不是版本号/ETag（§11.38）")
 
-    checkEq("ISO → HTTP 日期", isoToHttpDate("2026-09-13T15:00:14Z"), "Sun, 13 Sep 2026 15:00:14 GMT")
-    checkEq("带毫秒的 ISO 也能转", isoToHttpDate("2026-09-14T15:54:01.406143Z"), "Mon, 14 Sep 2026 15:54:01 GMT")
-    checkEq("解析不了就返回 null（宁可不省流量，也不发畸形头）", isoToHttpDate("不是日期"), null)
+    checkEq("本地 sha 与远端一致 → 跳过（零请求）",
+        SyncDecision.decide(localSha = "abc", remoteSha = "abc", force = false),
+        SyncDecision.Action.SKIP_UNCHANGED)
+    checkEq("内容变了 → 下载",
+        SyncDecision.decide(localSha = "abc", remoteSha = "def", force = false),
+        SyncDecision.Action.DOWNLOAD)
+    checkEq("本地没有 sha 记录（旧版本升上来）→ 下载一次",
+        SyncDecision.decide(localSha = null, remoteSha = "abc", force = false),
+        SyncDecision.Action.DOWNLOAD)
+    checkEq("远端已无此表 → 跳过且不动本地数据",
+        SyncDecision.decide(localSha = "abc", remoteSha = null, force = false),
+        SyncDecision.Action.SKIP_MISSING_REMOTE)
+    checkEq("强制核对 → 即使 sha 一致也重下",
+        SyncDecision.decide(localSha = "abc", remoteSha = "abc", force = true),
+        SyncDecision.Action.DOWNLOAD)
+    checkEq("远端已无此表 + 强制 → 依然跳过（不能把本地数据删掉）",
+        SyncDecision.decide(localSha = "abc", remoteSha = null, force = true),
+        SyncDecision.Action.SKIP_MISSING_REMOTE)
+
+    // ── 内置快照的 sha 必须与本地源数据算出来的完全一致 ──
+    // 这是整套机制的地基：manifest 里的 sha 一旦和真实内容对不上，
+    // App 首次同步就会把每一张表都判成"变了"而全量重下，或者更糟——把对的判成"没变"。
+    // 这里直接用 App 里那份 gitBlobShaOf 去算，等于同时验证「算法实现」与「快照记录」。
+    run {
+        val manifestFile = File(packDir, "manifest.json")
+        if (!manifestFile.isFile) {
+            check("读到内置快照清单", false, "缺少 ${manifestFile.absolutePath}")
+        } else {
+            val manifest = json.parseToJsonElement(manifestFile.readText()).jsonObject
+            val tables = manifest["tables"]?.jsonArray.orEmpty().mapNotNull { it as? JsonObject }
+            val shaRepo = MasterRepository(okhttp3.OkHttpClient(), File("."))
+            var checked = 0
+            val mismatched = mutableListOf<String>()
+            val missingSha = mutableListOf<String>()
+            for (row in tables) {
+                val file = row.stringValue("file") ?: continue
+                val sha = row.stringValue("sha")
+                if (sha == null) { missingSha += file; continue }
+                val raw = File(rawDirForCheck, file)
+                if (!raw.isFile) continue
+                checked++
+                val actual = shaRepo.gitBlobShaOf(raw)
+                if (actual != sha) mismatched += "$file(记录 ${sha.take(8)} / 实算 ${actual.take(8)})"
+            }
+            check("清单里带 sha 的表数 = 表总数", missingSha.isEmpty(), "缺 sha：${missingSha.take(5)}")
+            check("抽查的源数据文件数 ≥ 50", checked >= 50, "实际 $checked")
+            check(
+                "★ 清单记录的 sha 与源数据算出来的完全一致（$checked 张表）",
+                mismatched.isEmpty(),
+                mismatched.take(3).joinToString("；"),
+            )
+        }
+    }
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))
