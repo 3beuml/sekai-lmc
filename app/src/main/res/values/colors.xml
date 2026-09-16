@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      启动窗口底色。Compose 首帧之前显示的就是它。
+      这里对应浅色主题的 background（#F5FAF9），与 ui/theme/Theme.kt 里的 LightColors 保持一致；
+      深色版本在 values-night/colors.xml。
+    -->
+    <color name="app_background">#FFF5FAF9</color>
+</resources>

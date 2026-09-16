@@ -1,0 +1,452 @@
+{
+  "id": 1,
+  "seq": 10,
+  "characterId": 1,
+  "cardRarityType": "rarity_1",
+  "specialTrainingPower1BonusFixed": 0,
+  "specialTrainingPower2BonusFixed": 0,
+  "specialTrainingPower3BonusFixed": 0,
+  "attr": "cool",
+  "supportUnit": "none",
+  "skillId": 1,
+  "cardSkillName": "足元の小さな花",
+  "prefix": "クールだけど友達想い",
+  "assetbundleName": "res001_no001",
+  "gachaPhrase": "-",
+  "flavorText": "フレーバーテキスト",
+  "releaseAt": 1601391600000,
+  "archivePublishedAt": 1233284400000,
+  "cardSupplyId": 1,
+  "cardParameters": [
+    {
+      "id": 10001,
+      "cardId": 1,
+      "cardLevel": 1,
+      "cardParameterType": "param1",
+      "power": 1065
+    },
+    {
+      "id": 10002,
+      "cardId": 1,
+      "cardLevel": 2,
+      "cardParameterType": "param1",
+      "power": 1149
+    },
+    {
+      "id": 10003,
+      "cardId": 1,
+      "cardLevel": 3,
+      "cardParameterType": "param1",
+      "power": 1233
+    },
+    {
+      "id": 10004,
+      "cardId": 1,
+      "cardLevel": 4,
+      "cardParameterType": "param1",
+      "power": 1317
+    },
+    {
+      "id": 10005,
+      "cardId": 1,
+      "cardLevel": 5,
+      "cardParameterType": "param1",
+      "power": 1401
+    },
+    {
+      "id": 10006,
+      "cardId": 1,
+      "cardLevel": 6,
+      "cardParameterType": "param1",
+      "power": 1485
+    },
+    {
+      "id": 10007,
+      "cardId": 1,
+      "cardLevel": 7,
+      "cardParameterType": "param1",
+      "power": 1569
+    },
+    {
+      "id": 10008,
+      "cardId": 1,
+      "cardLevel": 8,
+      "cardParameterType": "param1",
+      "power": 1653
+    },
+    {
+      "id": 10009,
+      "cardId": 1,
+      "cardLevel": 9,
+      "cardParameterType": "param1",
+      "power": 1737
+    },
+    {
+      "id": 10010,
+      "cardId": 1,
+      "cardLevel": 10,
+      "cardParameterType": "param1",
+      "power": 1821
+    },
+    {
+      "id": 10011,
+      "cardId": 1,
+      "cardLevel": 11,
+      "cardParameterType": "param1",
+      "power": 1906
+    },
+    {
+      "id": 10012,
+      "cardId": 1,
+      "cardLevel": 12,
+      "cardParameterType": "param1",
+      "power": 1990
+    },
+    {
+      "id": 10013,
+      "cardId": 1,
+      "cardLevel": 13,
+      "cardParameterType": "param1",
+      "power": 2074
+    },
+    {
+      "id": 10014,
+      "cardId": 1,
+      "cardLevel": 14,
+      "cardParameterType": "param1",
+      "power": 2158
+    },
+    {
+      "id": 10015,
+      "cardId": 1,
+      "cardLevel": 15,
+      "cardParameterType": "param1",
+      "power": 2242
+    },
+    {
+      "id": 10016,
+      "cardId": 1,
+      "cardLevel": 16,
+      "cardParameterType": "param1",
+      "power": 2326
+    },
+    {
+      "id": 10017,
+      "cardId": 1,
+      "cardLevel": 17,
+      "cardParameterType": "param1",
+      "power": 2410
+    },
+    {
+      "id": 10018,
+      "cardId": 1,
+      "cardLevel": 18,
+      "cardParameterType": "param1",
+      "power": 2494
+    },
+    {
+      "id": 10019,
+      "cardId": 1,
+      "cardLevel": 19,
+      "cardParameterType": "param1",
+      "power": 2578
+    },
+    {
+      "id": 10020,
+      "cardId": 1,
+      "cardLevel": 20,
+      "cardParameterType": "param1",
+      "power": 2663
+    },
+    {
+      "id": 11001,
+      "cardId": 1,
+      "cardLevel": 1,
+      "cardParameterType": "param2",
+      "power": 930
+    },
+    {
+      "id": 11002,
+      "cardId": 1,
+      "cardLevel": 2,
+      "cardParameterType": "param2",
+      "power": 1003
+    },
+    {
+      "id": 11003,
+      "cardId": 1,
+      "cardLevel": 3,
+      "cardParameterType": "param2",
+      "power": 1076
+    },
+    {
+      "id": 11004,
+      "cardId": 1,
+      "cardLevel": 4,
+      "cardParameterType": "param2",
+      "power": 1150
+    },
+    {
+      "id": 11005,
+      "cardId": 1,
+      "cardLevel": 5,
+      "cardParameterType": "param2",
+      "power": 1223
+    },
+    {
+      "id": 11006,
+      "cardId": 1,
+      "cardLevel": 6,
+      "cardParameterType": "param2",
+      "power": 1297
+    },
+    {
+      "id": 11007,
+      "cardId": 1,
+      "cardLevel": 7,
+      "cardParameterType": "param2",
+      "power": 1370
+    },
+    {
+      "id": 11008,
+      "cardId": 1,
+      "cardLevel": 8,
+      "cardParameterType": "param2",
+      "power": 1443
+    },
+    {
+      "id": 11009,
+      "cardId": 1,
+      "cardLevel": 9,
+      "cardParameterType": "param2",
+      "power": 1517
+    },
+    {
+      "id": 11010,
+      "cardId": 1,
+      "cardLevel": 10,
+      "cardParameterType": "param2",
+      "power": 1590
+    },
+    {
+      "id": 11011,
+      "cardId": 1,
+      "cardLevel": 11,
+      "cardParameterType": "param2",
+      "power": 1664
+    },
+    {
+      "id": 11012,
+      "cardId": 1,
+      "cardLevel": 12,
+      "cardParameterType": "param2",
+      "power": 1737
+    },
+    {
+      "id": 11013,
+      "cardId": 1,
+      "cardLevel": 13,
+      "cardParameterType": "param2",
+      "power": 1811
+    },
+    {
+      "id": 11014,
+      "cardId": 1,
+      "cardLevel": 14,
+      "cardParameterType": "param2",
+      "power": 1884
+    },
+    {
+      "id": 11015,
+      "cardId": 1,
+      "cardLevel": 15,
+      "cardParameterType": "param2",
+      "power": 1957
+    },
+    {
+      "id": 11016,
+      "cardId": 1,
+      "cardLevel": 16,
+      "cardParameterType": "param2",
+      "power": 2031
+    },
+    {
+      "id": 11017,
+      "cardId": 1,
+      "cardLevel": 17,
+      "cardParameterType": "param2",
+      "power": 2104
+    },
+    {
+      "id": 11018,
+      "cardId": 1,
+      "cardLevel": 18,
+      "cardParameterType": "param2",
+      "power": 2178
+    },
+    {
+      "id": 11019,
+      "cardId": 1,
+      "cardLevel": 19,
+      "cardParameterType": "param2",
+      "power": 2251
+    },
+    {
+      "id": 11020,
+      "cardId": 1,
+      "cardLevel": 20,
+      "cardParameterType": "param2",
+      "power": 2325
+    },
+    {
+      "id": 12001,
+      "cardId": 1,
+      "cardLevel": 1,
+      "cardParameterType": "param3",
+      "power": 1035
+    },
+    {
+      "id": 12002,
+      "cardId": 1,
+      "cardLevel": 2,
+      "cardParameterType": "param3",
+      "power": 1116
+    },
+    {
+      "id": 12003,
+      "cardId": 1,
+      "cardLevel": 3,
+      "cardParameterType": "param3",
+      "power": 1198
+    },
+    {
+      "id": 12004,
+      "cardId": 1,
+      "cardLevel": 4,
+      "cardParameterType": "param3",
+      "power": 1280
+    },
+    {
+      "id": 12005,
+      "cardId": 1,
+      "cardLevel": 5,
+      "cardParameterType": "param3",
+      "power": 1361
+    },
+    {
+      "id": 12006,
+      "cardId": 1,
+      "cardLevel": 6,
+      "cardParameterType": "param3",
+      "power": 1443
+    },
+    {
+      "id": 12007,
+      "cardId": 1,
+      "cardLevel": 7,
+      "cardParameterType": "param3",
+      "power": 1525
+    },
+    {
+      "id": 12008,
+      "cardId": 1,
+      "cardLevel": 8,
+      "cardParameterType": "param3",
+      "power": 1606
+    },
+    {
+      "id": 12009,
+      "cardId": 1,
+      "cardLevel": 9,
+      "cardParameterType": "param3",
+      "power": 1688
+    },
+    {
+      "id": 12010,
+      "cardId": 1,
+      "cardLevel": 10,
+      "cardParameterType": "param3",
+      "power": 1770
+    },
+    {
+      "id": 12011,
+      "cardId": 1,
+      "cardLevel": 11,
+      "cardParameterType": "param3",
+      "power": 1851
+    },
+    {
+      "id": 12012,
+      "cardId": 1,
+      "cardLevel": 12,
+      "cardParameterType": "param3",
+      "power": 1933
+    },
+    {
+      "id": 12013,
+      "cardId": 1,
+      "cardLevel": 13,
+      "cardParameterType": "param3",
+      "power": 2015
+    },
+    {
+      "id": 12014,
+      "cardId": 1,
+      "cardLevel": 14,
+      "cardParameterType": "param3",
+      "power": 2096
+    },
+    {
+      "id": 12015,
+      "cardId": 1,
+      "cardLevel": 15,
+      "cardParameterType": "param3",
+      "power": 2178
+    },
+    {
+      "id": 12016,
+      "cardId": 1,
+      "cardLevel": 16,
+      "cardParameterType": "param3",
+      "power": 2260
+    },
+    {
+      "id": 12017,
+      "cardId": 1,
+      "cardLevel": 17,
+      "cardParameterType": "param3",
+      "power": 2341
+    },
+    {
+      "id": 12018,
+      "cardId": 1,
+      "cardLevel": 18,
+      "cardParameterType": "param3",
+      "power": 2423
+    },
+    {
+      "id": 12019,
+      "cardId": 1,
+      "cardLevel": 19,
+      "cardParameterType": "param3",
+      "power": 2505
+    },
+    {
+      "id": 12020,
+      "cardId": 1,
+      "cardLevel": 20,
+      "cardParameterType": "param3",
+      "power": 2587
+    }
+  ],
+  "specialTrainingCosts": [],
+  "masterLessonAchieveResources": [
+    {
+      "releaseConditionId": 8,
+      "cardId": 1,
+      "masterRank": 1,
+      "resources": []
+    }
+  ],
+  "initialSpecialTrainingStatus": "not_doing"
+}

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 仅用于访问公开的 master data JSON 与素材 CDN -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+        仅用于「把卡面/贴纸保存到 下载/SekaiLMC/」。
+        Android 10（API 29）起由系统 DownloadManager 走 MediaStore 代写，不再需要此权限，
+        所以用 maxSdkVersion 把它限制在 28 及以下，避免在新机型上多要一个权限。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!--
+        试听音频的后台播放：通知栏 / 锁屏 / 蓝牙耳机控制。
+        POST_NOTIFICATIONS 仅 Android 13+ 需要运行时授权；拒绝也不影响播放，只是不显示通知。
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <application
+        android:name=".PjskApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SekaiLmc">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.SekaiLmc"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            播放服务：把 App 里那一个 ExoPlayer 包成 MediaSession，
+            由系统渲染通知栏/锁屏控制。播放中它是前台服务，所以退到后台也不会被杀。
+        -->
+        <service
+            android:name=".data.player.PlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+    </application>
+
+</manifest>

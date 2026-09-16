@@ -1,0 +1,44 @@
+{
+  "id": 1,
+  "shortDescription": "スコア{{1;v}}%ＵＰ",
+  "description": "{{1;d}}秒間  スコアが{{1;v}}%UPする",
+  "descriptionSpriteName": "score_up",
+  "skillFilterId": 1,
+  "skillEffects": [
+    {
+      "id": 1,
+      "skillEffectType": "score_up",
+      "activateNotesJudgmentType": "good",
+      "skillEffectDetails": [
+        {
+          "id": 1,
+          "level": 1,
+          "activateEffectDuration": 5,
+          "activateEffectValueType": "rate",
+          "activateEffectValue": 20
+        },
+        {
+          "id": 2,
+          "level": 2,
+          "activateEffectDuration": 5,
+          "activateEffectValueType": "rate",
+          "activateEffectValue": 25
+        },
+        {
+          "id": 3,
+          "level": 3,
+          "activateEffectDuration": 5,
+          "activateEffectValueType": "rate",
+          "activateEffectValue": 30
+        },
+        {
+          "id": 4,
+          "level": 4,
+          "activateEffectDuration": 5,
+          "activateEffectValueType": "rate",
+          "activateEffectValue": 40
+        }
+      ]
+    }
+  ]
+}

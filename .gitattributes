@@ -1,0 +1,25 @@
+# 统一行尾：仓库里一律存 LF（Windows 检出也是 LF，省掉 CRLF 警告与整文件 diff 噪音）
+* text=auto eol=lf
+
+# Windows 批处理必须 CRLF：cmd.exe 解析 goto/label 时对 LF-only 的 .bat 会出错
+*.bat text eol=crlf
+
+# 二进制：别做行尾转换，也别让 GitHub 去渲染 diff
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.gif  binary
+*.ico  binary
+*.jar  binary
+*.zip  binary
+*.apk  binary
+*.aab  binary
+*.bin  binary
+
+# 内置数据快照是压成一行的生成文件（单个最大 1.7 MB），
+# 不标的话 GitHub 会尝试渲染「单行 12 MB」的 diff，很卡且没有意义
+app/src/main/assets/datapack/** -text -diff
+
+# 逻辑自检的夹具同理：都是从真实数据里截出来的片段
+tools/logic-check/fixtures/** -text -diff

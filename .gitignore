@@ -1,0 +1,52 @@
+# Gradle
+.gradle/
+build/
+app/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Room 导出的 schema 需要提交（用于日后写迁移），故不忽略 app/schemas
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# docs/ 是本地开发资料，**不进公开仓库**，只留本地：
+#   docs/PROJECT_NOTES.md      开发笔记（内部记忆，含开发过程中的对话式决策记录）
+#   docs/research/             立项阶段读参考站/游戏客户端时的调研记录
+#   docs/art/                  应用图标源图
+docs/
+
+# Kotlin 编译器会话临时文件（0 字节，每次构建都会变）
+.kotlin/
+
+# ── 数据快照的「源数据」：不进仓库 ─────────────────────────────────
+#
+# 这些文件是 tools/datapack/ 的输入，可以随时用脚本重新下载，
+# 但体积很大（raw 合计约 93 MB，单张 gachas.json 就有 45.7 MB），
+# 放进仓库会让 clone / push 变得很痛苦，GitHub 也会对个别文件报警。
+#
+# 要重新生成内置快照时的顺序：
+#   1. node tools/datapack/fetch-raw.mjs character music event sticker card gacha
+#   2. node tools/datapack/fetch-cn-overlay.mjs （同上模块，取简中中文名）
+#   3. powershell -File tools/datapack/build.ps1
+#
+# ⚠️ 注意：**打包好的快照要提交**（`app/src/main/assets/datapack/`，约 12 MB），
+# 它是 APK 的一部分 —— 新克隆的人不下载源数据也能直接构建。
+tools/datapack/raw/
+tools/datapack/cn/
+
+# 探测 / 审计脚本的临时产物（抓下来的样本、文本报告）
+tools/.cache/
+
+# 构建产物（保险，万一 build/ 被别的规则漏掉）
+*.apk
+*.aab
+

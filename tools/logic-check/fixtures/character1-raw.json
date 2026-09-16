@@ -1,0 +1,19 @@
+{
+  "id": 1,
+  "seq": 1,
+  "resourceId": 1,
+  "firstName": "星乃",
+  "givenName": "一歌",
+  "firstNameRuby": "ほしの",
+  "givenNameRuby": "いちか",
+  "firstNameEnglish": "HOSHINO",
+  "givenNameEnglish": "ICHIKA",
+  "gender": "female",
+  "height": 161,
+  "live2dHeightAdjustment": 85,
+  "figure": "ladies",
+  "breastSize": "m",
+  "modelName": "01ichika",
+  "unit": "light_sound",
+  "supportUnitType": "none"
+}

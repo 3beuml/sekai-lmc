@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      深色模式下的启动窗口底色，取自需求文档的 #0f0f1a。
+      Compose 首帧画出来之前显示的就是这个颜色，写浅色会闪白屏。
+    -->
+    <color name="app_background">#FF0F0F1A</color>
+</resources>
