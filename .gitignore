@@ -12,6 +12,13 @@ captures/
 .externalNativeBuild/
 .cxx/
 
+# 签名：凭据文件与密钥文件都不进仓库
+#   keystore.properties 里有 storePassword / keyPassword（明文），
+#   keystore 本身默认放在仓库外的 ..\..\keystore\
+keystore.properties
+*.jks
+*.keystore
+
 # Room 导出的 schema 需要提交（用于日后写迁移），故不忽略 app/schemas
 
 # 系统

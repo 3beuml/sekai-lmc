@@ -13,10 +13,19 @@
 
 | | |
 | --- | --- |
-| **Android APK** | 见 [Releases](https://github.com/3beuml/sekai-lmc/releases)（当前 `0.1.0`，约 23 MB，需要 **Android 8.0** 及以上） |
+| **Android APK** | 见 [Releases](https://github.com/3beuml/sekai-lmc/releases)（当前 `0.1.0`，约 16 MB，需要 **Android 8.0** 及以上），下载 `app-release.apk` 侧载 |
 | **源代码** | 本仓库；每个 Release 页面也会自动附 `Source code (zip / tar.gz)` |
 
 安装：侧载 APK，首次需要在系统里允许「安装未知来源应用」。
+
+安装包用固定密钥签名，证书 SHA-256 指纹：
+
+```
+AA:49:A7:B9:BC:D9:CE:75:18:56:B3:DC:EC:7C:0C:2C:DD:F3:F5:05:9F:22:B7:9F:10:DD:DB:C8:77:9A:1D:92
+```
+
+想核对下载到的文件，可以 `apksigner verify --print-certs app-release.apk`，或者直接看
+系统「应用信息 → 应用详情」里的签名摘要。指纹一致就说明是本仓库发布的包。
 
 ## 功能
 
@@ -52,6 +61,12 @@ master data   https://sekai-world.github.io/sekai-master-db-diff/<file>.json    
 ```bash
 ./gradlew :app:assembleDebug     # 产物：app/build/outputs/apk/debug/app-debug.apk
 ```
+
+如果需要 release 包：`./gradlew :app:assembleRelease`。仓库里**不含任何密钥** ——
+正式签名读根目录的 `keystore.properties`（已 gitignore，写明 keystore 路径与密码），
+没有这个文件时会自动退回调试签名，所以别人 clone 下来也能正常构建。
+注意**调试签名与 Release 里的正式签名互不兼容**：装了正式签名的包以后，再装自己构建的调试包
+会报签名不一致，得先卸载（数据也会一起清掉）。
 
 仓库里**已经包含打包好的数据快照**，所以不下载任何原始数据也能构建出可用安装包。
 游戏大更新后要重建快照（原始数据不进仓库）：先 `tools/datapack/fetch-raw.mjs` 拉原始数据，

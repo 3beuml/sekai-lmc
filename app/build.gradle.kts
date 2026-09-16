@@ -2,7 +2,21 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 // 必须显式 import：在 Kotlin DSL 脚本里写 `java.util.zip.ZipFile` 会被解析成
 // Gradle 的 `java` 扩展（JavaPluginExtension），而不是 Java 的包名，
 // 报错是「Unresolved reference: util」。
+import java.util.Properties
 import java.util.zip.ZipFile
+
+// ── release 签名 ───────────────────────────────────────────────────────
+// 凭据放在仓库根目录的 keystore.properties（已 gitignore），keystore 文件本身放在
+// **仓库之外**（..\..\keystore\），所以两者都不会被提交。
+//
+// 没这个文件时（别人 clone 下来自己构建）自动回退到 debug 签名：
+// 这样 assembleRelease 不会因为缺凭据直接失败，仓库里也不必放任何密钥。
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
+}
+val releaseStoreFile = keystoreProps.getProperty("storeFile")?.let { file(it) }
+val hasReleaseSigning = releaseStoreFile?.exists() == true
 
 plugins {
     alias(libs.plugins.android.application)
@@ -24,6 +38,17 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -31,6 +56,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            // 有正式密钥就用它；没有就退回 debug 签名（并会在构建时打印提醒）
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                logger.lifecycle("⚠️ 未找到 keystore.properties，release 包将使用 debug 签名（不能覆盖安装正式签名的包）")
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
