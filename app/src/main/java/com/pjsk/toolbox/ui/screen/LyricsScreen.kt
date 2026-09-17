@@ -212,8 +212,10 @@ private fun LyricsBody(
         return
     }
 
-    // 演唱者名字：rendition 里给的是日文名，这里按角色 id 换成当前语言的名字
-    val performerNames = remember(rendition) { rendition.performerNames }
+    // 「这一句是谁唱的」：按 **角色 id** 查名字。
+    // ⚠️ 不要再按"这一行里第几个演唱者"的位置去取名 —— 两个列表的顺序毫无关系，
+    // 只唱一个人的行下标恒为 0，会整页都显示成名单里的第一个人（已修，见 §bug）。
+    val performerNameById = remember(rendition) { rendition.nameById }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -343,7 +345,7 @@ private fun LyricsBody(
             LyricLineItem(
                 line = line,
                 region = region,
-                performerNames = performerNames,
+                performerNameById = performerNameById,
                 showSingers = prev?.performerIds != line.performerIds,
             )
         }
@@ -414,7 +416,8 @@ private fun CreditLink(label: String, url: String) {
 private fun LyricLineItem(
     line: LyricsLine,
     region: ServerRegion,
-    performerNames: List<String>,
+    /** 角色 id → 演唱者名字。**必须按 id 查**（见调用处的说明）。 */
+    performerNameById: Map<Int, String>,
     showSingers: Boolean,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -430,7 +433,7 @@ private fun LyricLineItem(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                line.performerIds.forEachIndexed { index, id ->
+                line.performerIds.forEach { id ->
                     RemoteImage(
                         url = AssetUrls.characterAvatar(region, id),
                         contentDescription = null,
@@ -438,7 +441,9 @@ private fun LyricLineItem(
                         modifier = Modifier.size(20.dp).clip(CircleShape),
                         alignment = Alignment.TopCenter,
                     )
-                    val name = performerNames.getOrNull(index)
+                    // ⚠️ 按 **id** 取名字：头像也是按 id 拿的，两者必须同一个来源，
+                    // 否则就会出现"图上是一个人、名字写着另一个人"。
+                    val name = performerNameById[id]
                     if (!name.isNullOrBlank()) {
                         Text(
                             text = name,

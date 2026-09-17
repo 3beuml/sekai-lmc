@@ -985,6 +985,37 @@ fun main(args: Array<String>) {
     checkEq("v3: 演唱者 id 解析（歌唱者-20 → 20）", r3.full?.lines?.get(0)?.performerIds, listOf(20))
     checkEq("v3: 第三行换人（17）", r3.full?.lines?.get(2)?.performerIds, listOf(17))
     checkEq("v3: 版本中文标签", r3.displayLabel, "SEKAI 版 · 宵崎奏、MEIKO")
+
+    // ── 演唱者名字必须**按角色 id** 查，不能按「这一行里第几个」取 ──
+    // 这是真实 bug 的回归断言：原来是 `performerNames.getOrNull(index)`，
+    // 而 index 是"行内的第几个"、performerNames 是"整个版本的名字列表"，两者毫无关系 ——
+    // 只唱一个人的行下标恒为 0，于是整页都显示成名单里的第一个人，
+    // 头像（按 id 拿，是对的）和名字对不上。
+    checkEq("v3: 演唱者对象带 id", r3.performers.map { it.id }, listOf(17, 25))
+    checkEq("v3: 名字按 id 查（17 → 宵崎奏）", r3.nameById[17], "宵崎奏")
+    checkEq("v3: 名字按 id 查（25 → MEIKO）", r3.nameById[25], "MEIKO")
+    check(
+        "★ 行内 id 不在名单里时不冒充别人（第 1 行是「歌唱者-20」，名单只有 17/25）",
+        r3.nameById[20] == null,
+        "按位置取会得到名单第一个「宵崎奏」，实际=${r3.nameById[20]}",
+    )
+    checkEq(
+        "★ 单人行的名字是该演唱者自己（第 3 行 歌唱者-17 → 宵崎奏，不是名单第一个的巧合）",
+        r3.full?.lines?.get(2)?.performerIds?.mapNotNull { r3.nameById[it] },
+        listOf("宵崎奏"),
+    )
+    checkEq("performerNames 仍按数据顺序（版本标签要用）", r3.performerNames, listOf("宵崎奏", "MEIKO"))
+
+    // 数据里若出现"只有名字、没有 id"的条目：名字仍要能显示在标签里，只是查不到 id
+    val noIdJson = """
+        {"version":3,"musicId":999,"revision":1,"state":"complete","renditions":[
+          {"key":"k","kind":"sekai","label":"SEKAI Version","performers":[{"name":"某人"}],
+           "full":{"version":{"kind":"sekai"},"lines":[
+             {"id":"l1","order":0,"japanese":"あ","segments":[{"text":"あ","performerIds":["歌唱者-17"]}]}]}}]}
+    """.trimIndent()
+    val noIdDoc = parseLyricsDocument(noIdJson, 0)
+    checkEq("缺 id 的演唱者仍保留名字", noIdDoc?.renditions?.first()?.performerNames, listOf("某人"))
+    checkEq("缺 id 时不进 nameById（查不到就不显示，不猜）", noIdDoc?.renditions?.first()?.nameById?.size, 0)
     checkEq("v3: 来源条数", r3.credits.size, 1)
     checkEq("v3: 来源显示名", r3.credits[0].providerLabel, "Sekaipedia")
     checkEq("v3: 许可名（必须展示）", r3.credits[0].licenseName, "CC BY-SA 4.0")

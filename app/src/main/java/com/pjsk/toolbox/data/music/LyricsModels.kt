@@ -88,6 +88,17 @@ data class LyricsCredit(
 }
 
 /**
+ * 一位演唱者。
+ *
+ * ⚠️ [id] 是 **gameCharacterId**（实测歌词里的 `performerId` 形如 `歌唱者-09`，
+ * 末尾数字与 master data 的 `gameCharacters.id` 完全一致，抽样 20/20 命中），
+ * 所以它既能拿去查头像、也能拿去查角色名。
+ *
+ * [id] 允许为 null：万一以后数据里出现没有 id 只有名字的条目，名字仍要能显示在版本标签里。
+ */
+data class LyricsPerformer(val id: Int?, val name: String)
+
+/**
  * 一个演唱版本对应的歌词。
  *
  * 注意 rendition **不是** `musicVocals` 的一一对应：
@@ -99,12 +110,25 @@ data class LyricsRendition(
     val kind: String,
     /** 数据里的原始标签（英文），如 `SEKAI Version`。 */
     val rawLabel: String,
-    val performerNames: List<String>,
+    /** 这个版本的演唱者，**保持数据里的顺序**（版本标签按这个顺序显示）。 */
+    val performers: List<LyricsPerformer>,
     val full: LyricsVersion?,
     val game: LyricsVersion?,
     val credits: List<LyricsCredit>,
     val translators: List<String>,
 ) {
+    /**
+     * **id → 名字**。界面上标注"这一句是谁唱的"必须用它，**不要按位置取**。
+     *
+     * 踩过的坑（真实 bug）：原来用「这一行里第几个演唱者」当索引进 [performerNames]，
+     * 而两个列表毫无关系 —— 某行只有一个人唱时，它的下标永远是 0，
+     * 于是整页都显示成名单里的第一个人，头像（用 id 查，是对的）和名字对不上。
+     */
+    val nameById: Map<Int, String> get() = performers.mapNotNull { p -> p.id?.let { it to p.name } }.toMap()
+
+    /** 只要名字列表（版本标签用，保持数据顺序）。 */
+    val performerNames: List<String> get() = performers.map { it.name }
+
     /** 中文标签。规则见 [renditionDisplayLabel]。 */
     val displayLabel: String get() = renditionDisplayLabel(kind, rawLabel, performerNames)
 
@@ -263,9 +287,13 @@ fun parseLyricsDocument(text: String, fallbackMusicId: Int): LyricsDocument? {
             key = key,
             kind = obj.str("kind").orEmpty(),
             rawLabel = obj.str("label").orEmpty().ifBlank { key },
-            performerNames = obj.arr("performers")
-                ?.mapNotNull { (it.asObj()?.str("name")) }
-                .orEmpty(),
+            // ⚠️ 这里必须把 `performerId` 一起留下来（解析成数字当 key）。
+            // 只留名字的话，界面就只剩下"按位置猜"一条路 —— 那正是之前的 bug。
+            performers = obj.arr("performers").orEmpty().mapNotNull { element ->
+                val po = element.asObj() ?: return@mapNotNull null
+                val name = po.str("name") ?: return@mapNotNull null
+                LyricsPerformer(id = parsePerformerId(po.str("performerId")), name = name)
+            },
             full = full,
             game = game,
             credits = obj.arr("provenance").orEmpty().mapNotNull { parseCredit(it.asObj()) }.distinct(),
