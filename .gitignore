@@ -27,9 +27,13 @@ Thumbs.db
 
 # docs/ 是本地开发资料，**不进公开仓库**，只留本地：
 #   docs/PROJECT_NOTES.md      开发笔记（内部记忆，含开发过程中的对话式决策记录）
+#   docs/PROJECT_MEMORY.md     项目记忆（项目地图/数据层/坑/发版流程/路线图）
 #   docs/research/             立项阶段读参考站/游戏客户端时的调研记录
 #   docs/art/                  应用图标源图
 docs/
+
+# 给 AI 会话的入口说明（指向 docs/PROJECT_MEMORY.md，那份文件不公开，所以它也不公开）
+AGENTS.md
 
 # Kotlin 编译器会话临时文件（0 字节，每次构建都会变）
 .kotlin/
