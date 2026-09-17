@@ -52,6 +52,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pjsk.toolbox.PjskApp
+import com.pjsk.toolbox.data.card.characterNameMap
 import com.pjsk.toolbox.data.music.LyricsDocument
 import com.pjsk.toolbox.data.music.LyricsIndexEntry
 import com.pjsk.toolbox.data.music.LyricsLine
@@ -104,6 +105,10 @@ fun LyricsScreen(
 ) {
     val container = (LocalContext.current.applicationContext as PjskApp).container
     val nameLanguage by container.appSettings.nameLanguage.collectAsState()
+    // 角色 id → 名字（跟随名称语言）。歌词数据自己不一定带名字（旧格式 v1 就没有），
+    // 所以名字一律以这份为准，取不到再退回歌词数据里的名字。
+    val characters by container.cardRepository.characters.collectAsState(initial = emptyList())
+    val characterNames = remember(characters, nameLanguage) { characterNameMap(characters, nameLanguage) }
 
     var result by remember(musicId) { mutableStateOf<LyricsResult?>(null) }
     var loading by remember(musicId) { mutableStateOf(true) }
@@ -148,11 +153,22 @@ fun LyricsScreen(
                     )
                 }
 
+                // ⚠️ 与上面分开：「格式不认识」不是「没有歌词」。
+                // 以前两者混在一起，于是 #803（旧格式 v1）被显示成"这首曲子还没有歌词"，
+                // 排查时只能靠逐个字段试。
+                current is LyricsResult.Unsupported -> LyricsMessage(
+                    title = "这首歌的歌词格式暂不支持",
+                    description = "数据源的文档版本是 v${current.version}，比 App 认识的格式更新或更旧。" +
+                        "已经记进日志，会在后续版本跟进。" +
+                        "（顶层字段：${current.topFields.take(6).joinToString("、")}）",
+                )
+
                 current is LyricsResult.Incomplete -> LyricsBody(
                     document = current.document,
                     entry = null,
                     region = region,
                     nameLanguage = nameLanguage,
+                    characterNames = characterNames,
                     renditionIndex = renditionIndex,
                     showGameVersion = showGameVersion,
                     onRenditionChange = { renditionIndex = it },
@@ -165,11 +181,18 @@ fun LyricsScreen(
                     entry = current.entry,
                     region = region,
                     nameLanguage = nameLanguage,
+                    characterNames = characterNames,
                     renditionIndex = renditionIndex,
                     showGameVersion = showGameVersion,
                     onRenditionChange = { renditionIndex = it },
                     onVersionChange = { showGameVersion = it },
-                    notice = null,
+                    // 走的兜底解析（文档结构不是已知的 v1/v3/v4）就如实说一句
+                    notice = if (current.document.degraded) {
+                        "这份歌词是旧版格式（或较新的格式），已按能识别的部分显示，" +
+                            "来源与演唱者信息可能不全。"
+                    } else {
+                        null
+                    },
                 )
             }
         }
@@ -192,6 +215,8 @@ private fun LyricsBody(
     entry: LyricsIndexEntry?,
     region: ServerRegion,
     nameLanguage: NameLanguage,
+    /** 角色 id → 名字（跟随名称语言，来自 master data）。 */
+    characterNames: Map<Int, String>,
     renditionIndex: Int,
     showGameVersion: Boolean,
     onRenditionChange: (Int) -> Unit,
@@ -346,6 +371,7 @@ private fun LyricsBody(
                 line = line,
                 region = region,
                 performerNameById = performerNameById,
+                characterNames = characterNames,
                 showSingers = prev?.performerIds != line.performerIds,
             )
         }
@@ -418,6 +444,8 @@ private fun LyricLineItem(
     region: ServerRegion,
     /** 角色 id → 演唱者名字。**必须按 id 查**（见调用处的说明）。 */
     performerNameById: Map<Int, String>,
+    /** 角色 id → 名字（master data，跟随名称语言）。优先级高于歌词数据自带的名字。 */
+    characterNames: Map<Int, String>,
     showSingers: Boolean,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -443,7 +471,9 @@ private fun LyricLineItem(
                     )
                     // ⚠️ 按 **id** 取名字：头像也是按 id 拿的，两者必须同一个来源，
                     // 否则就会出现"图上是一个人、名字写着另一个人"。
-                    val name = performerNameById[id]
+                    // 名字优先用 master data（跟随名称语言，且旧格式歌词里根本没有名字），
+                    // 取不到再退回歌词数据自带的名字。
+                    val name = characterNames[id] ?: performerNameById[id]
                     if (!name.isNullOrBlank()) {
                         Text(
                             text = name,

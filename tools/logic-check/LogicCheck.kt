@@ -12,6 +12,7 @@ import com.pjsk.toolbox.data.card.maxTotal
 import com.pjsk.toolbox.data.card.normalMaxLevel
 import com.pjsk.toolbox.data.card.parseCard
 import com.pjsk.toolbox.data.card.PjskCharacter
+import com.pjsk.toolbox.data.card.characterNameMap
 import com.pjsk.toolbox.data.card.parseCharacter
 import com.pjsk.toolbox.data.card.parseSkill
 import com.pjsk.toolbox.data.card.filterCards
@@ -43,6 +44,8 @@ import com.pjsk.toolbox.data.music.sortSongs
 import com.pjsk.toolbox.data.music.unitMembers
 import com.pjsk.toolbox.data.music.lyricsStateLabel
 import com.pjsk.toolbox.data.music.noLyricsReasonLabel
+import com.pjsk.toolbox.data.music.LyricsParse
+import com.pjsk.toolbox.data.music.parseLyrics
 import com.pjsk.toolbox.data.music.parseLyricsDocument
 import com.pjsk.toolbox.data.music.parseLyricsIndex
 import com.pjsk.toolbox.data.music.parsePerformerId
@@ -1100,7 +1103,74 @@ fun main(args: Array<String>) {
     // ── 非法输入一律返回 null，不抛异常 ──
     checkEq("404 的纯文本正文 → null（不崩）", parseLyricsDocument("404 page not found", 1), null)
     checkEq("空字符串 → null", parseLyricsDocument("", 1), null)
-    checkEq("缺 renditions 字段 → null", parseLyricsDocument("""{"version":3,"musicId":5}""", 5), null)
+
+    // ── v1 旧格式（真实：音乐 #803「空に免じて」）──
+    // 曾经这里返回 null，然后被上层报成「这首曲子还没有歌词」—— 其实它是有歌词的，
+    // 只是 v1 把 lines 放在顶层、没有 renditions。这条断言就是那次误报的回归。
+    val v1Json = """
+        {"version":1,"musicId":803,"revision":4,"updatedAt":"2026-09-02T12:06:53Z",
+         "attribution":"雪莹ちゃん",
+         "attributions":[{"provider":"sekaipedia","title":"Sora ni Menjite","revisionId":344812,
+           "revisionUrl":"https://www.sekaipedia.org/wiki/Sora_ni_Menjite?oldid=344812",
+           "licenseName":"CC BY-SA 4.0","licenseUrl":"https://creativecommons.org/licenses/by-sa/4.0/"}],
+         "lines":[
+           {"id":"line-1","order":0,"japanese":"「頑張れ」　でも　「大丈夫」　でもない","zh-CN":"既不是「加油」　也不是「没事的」",
+            "en-US":"","segments":[{"text":"「頑張れ」　でも　「大丈夫」　でもない","performerIds":[21]}]},
+           {"id":"line-2","order":1,"japanese":"「君ならできる」　でもない","zh-CN":"更不是「你一定可以的」",
+            "en-US":"","segments":[{"text":"「君ならできる」　でもない","performerIds":[21]}]}]}
+    """.trimIndent()
+
+    val v1Parse = parseLyrics(v1Json, fallbackMusicId = 0)
+    check("★ v1 文档能解析（不再退化成「没有歌词」）", v1Parse is LyricsParse.Ok, "实际=$v1Parse")
+    val v1doc = (v1Parse as? LyricsParse.Ok)?.document
+    checkEq("★ v1 被标记为兜底解析（界面据此提示）", v1doc?.degraded, true)
+    checkEq("v1: musicId / revision", Pair(v1doc?.musicId, v1doc?.revision), Pair(803, 4))
+    checkEq("v1: 单版本", v1doc?.renditions?.size, 1)
+    checkEq("v1: 行数", v1doc?.renditions?.first()?.full?.lines?.size, 2)
+    checkEq("v1: 原文与翻译都在", v1doc?.renditions?.first()?.full?.lines?.get(0)?.translation, "既不是「加油」　也不是「没事的」")
+    // v1 的 performerIds 是**数字**（不是「歌唱者-21」），解析必须照样成立
+    checkEq("★ v1: performerIds 是数字也能解析", v1doc?.renditions?.first()?.full?.lines?.get(0)?.performerIds, listOf(21))
+    checkEq("v1: 来源从 attributions 取（v1 不叫 provenance）", v1doc?.renditions?.first()?.credits?.first()?.providerLabel, "Sekaipedia")
+    checkEq("v1: 译者从 attribution 字符串取", v1doc?.renditions?.first()?.translators, listOf("雪莹ちゃん"))
+    checkEq("v1: 版本标签不编造类型", v1doc?.renditions?.first()?.displayLabel, "默认版本")
+
+    // ── 未知格式：只要能找到"行数组"就降级显示，找不到才说"不支持" ──
+    val weirdJson = """
+        {"version":9,"musicId":1234,"revision":2,
+         "someFutureWrapper":{"lines":[
+           {"id":"x1","order":0,"japanese":"あいうえお","zh-CN":"啊伊呜诶哦"}]}}
+    """.trimIndent()
+    val weird = parseLyrics(weirdJson, 0)
+    check("★ 未知格式（v9）也能兜底解析出原文+翻译", weird is LyricsParse.Ok, "实际=$weird")
+    checkEq("兜底结果标记 degraded", (weird as? LyricsParse.Ok)?.document?.degraded, true)
+    checkEq("兜底取到了那一行", weird?.let { (it as? LyricsParse.Ok)?.document?.renditions?.first()?.full?.lines?.size }, 1)
+
+    val noLines = parseLyrics("""{"version":9,"musicId":7,"somethingElse":[{"a":1}]}""", 0)
+    check("★ 连行数组都没有 → Unsupported（不是「没有歌词」）", noLines is LyricsParse.Unsupported, "实际=$noLines")
+    checkEq("Unsupported 带上 version 供排查", (noLines as? LyricsParse.Unsupported)?.version, 9)
+    check(
+        "Unsupported 带上顶层字段名",
+        (noLines as? LyricsParse.Unsupported)?.topFields?.contains("somethingElse") == true,
+        "实际=${(noLines as? LyricsParse.Unsupported)?.topFields}",
+    )
+    check("非 JSON → NotJson（也不是「没有歌词」）", parseLyrics("404 page not found", 0) is LyricsParse.NotJson)
+
+    // ── 歌词页的演唱者名字：走 master data 的角色名（跟随名称语言）──
+    // 为什么必须这样：旧格式 v1 的文档里**没有演唱者名单**，只有 `performerIds` 数字，
+    // 不去 master data 取名的话那首歌永远只有头像没有名字。
+    val nameChars = listOf(
+        PjskCharacter(id = 9, nameJa = "小豆沢こはね", nameZh = "小豆泽心羽", unitKey = "vivid_bad_squad"),
+        PjskCharacter(id = 22, nameJa = "鏡音リン", nameZh = null, unitKey = null),
+    )
+    val zhNames = characterNameMap(nameChars, NameLanguage.CHINESE_FIRST)
+    checkEq("名字表：有中文名就用中文", zhNames[9], "小豆泽心羽")
+    checkEq("名字表：没有中文名回退日文原名", zhNames[22], "鏡音リン")
+    checkEq("名字表：日文原名模式", characterNameMap(nameChars, NameLanguage.JAPANESE)[9], "小豆沢こはね")
+
+    // ── 旧断言：缺 renditions 字段但**有 lines** 时，行为从"返回 null"改成"兜底解析" ──
+    val noRenditions = parseLyricsDocument("""{"version":3,"musicId":5,"lines":[{"japanese":"a","zh-CN":"甲"}]}""", 5)
+    check("缺 renditions 但有 lines → 兜底解析出内容（不再是 null）", noRenditions != null)
+    checkEq("……且 musicId 取自文档", noRenditions?.musicId, 5)
     checkEq("索引不是 JSON → 空列表", parseLyricsIndex("<html>not json</html>"), emptyList<LyricsIndexEntry>())
     checkEq(
         "多出未知字段要能容忍（数据会加字段）",

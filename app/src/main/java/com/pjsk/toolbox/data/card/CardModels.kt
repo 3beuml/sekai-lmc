@@ -389,3 +389,13 @@ fun PjskCharacter.displayNameFor(language: NameLanguage): String =
 
 fun PjskCharacter.secondaryNameFor(language: NameLanguage): String? =
     pickSecondary(nameZh, nameJa, language)
+
+/**
+ * 角色 id → 名字（跟随「名称语言」设置）。
+ *
+ * 用途：歌词页要标注"这一句是谁唱的"，而**歌词数据本身不一定带名字**
+ * （旧格式 v1 只有 `performerIds: [21]` 这种数字，没有名字列表），
+ * 所以统一从 master data 取，顺带让歌词页的角色名与卡牌页、剧情页保持同一种语言。
+ */
+fun characterNameMap(characters: List<PjskCharacter>, language: NameLanguage): Map<Int, String> =
+    characters.associate { it.id to it.displayNameFor(language) }

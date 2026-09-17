@@ -142,7 +142,34 @@ data class LyricsDocument(
     val revision: Int,
     val state: String,
     val renditions: List<LyricsRendition>,
+    /**
+     * 是否走的**兜底解析**（文档结构不是已知的 v1/v3/v4）。
+     *
+     * 兜底时只能保证"日文原文 + 中文翻译"这两样，来源/演唱者/译本可能缺失，
+     * 所以界面上要如实说一句，而不是假装一切正常。
+     */
+    val degraded: Boolean = false,
 )
+
+/**
+ * 解析结果。
+ *
+ * ⚠️ 为什么要区分这么细：以前解析失败直接返回 null，调用方又把它归成"索引里没有这首歌"，
+ * 于是界面显示「这首曲子还没有歌词」—— 真相是"格式不认识"。
+ * 那一次的代价是：用户在 #803 上看到"没有歌词"，排查时只能靠逐个字段试。
+ *
+ * 现在的规矩：**不知道就说不支持，别假装没有内容**。
+ */
+sealed interface LyricsParse {
+    /** 解析成功。[degraded] = 走的是兜底路径。 */
+    data class Ok(val document: LyricsDocument, val degraded: Boolean) : LyricsParse
+
+    /** 连"行数组"都找不到：记录文档的 version 与顶层字段名，便于排查（并打进日志）。 */
+    data class Unsupported(val version: Int, val topFields: List<String>) : LyricsParse
+
+    /** 响应不是 JSON（例如 404 页面、被截断的内容）。 */
+    data object NotJson : LyricsParse
+}
 
 /** 歌词索引里的一行。索引很小（711 首），一次拉全表。 */
 data class LyricsIndexEntry(
@@ -170,6 +197,9 @@ sealed interface LyricsResult {
     data class Incomplete(val document: LyricsDocument) : LyricsResult
 
     data class Ok(val document: LyricsDocument, val entry: LyricsIndexEntry?) : LyricsResult
+
+    /** 文档在、但**格式不认识**（不是"没有歌词"）。附带 version 与顶层字段名，便于排查。 */
+    data class Unsupported(val version: Int, val topFields: List<String>) : LyricsResult
 
     data class Failed(val message: String) : LyricsResult
 }
@@ -262,18 +292,36 @@ fun parseLyricsIndex(text: String): List<LyricsIndexEntry> {
     }
 }
 
-/** 解析一个歌词文档（v3 / v4 都支持）。 */
-fun parseLyricsDocument(text: String, fallbackMusicId: Int): LyricsDocument? {
-    val root = text.parseJsonObjectOrNull() ?: return null
+/**
+ * 解析一个歌词文档。支持已知的 v3 / v4 结构，并提供**兜底路径**。
+ *
+ * 线上实测存在三套 schema（新增 2026-09-18 发现 v1）：
+ *
+ * | | 结构 | 说明 |
+ * | --- | --- | --- |
+ * | **v1** | 顶层直接 `lines[]`，没有 `renditions`；来源在 `attributions`，译者是 `attribution` 字符串 | 个别老文档（实测 #803）。**没有演唱者名单** |
+ * | **v3** | `renditions[].{full,game}.lines[]`，行内 `zh-CN` | 主流 |
+ * | **v4** | 同上，但翻译在 `translationEditions[].renditions[].{full,game}.translations[]`（按下标平行） | 少数 |
+ *
+ * 兜底路径的规矩：**任何位置只要能找到"行数组"（元素是带 `japanese` 的对象），
+ * 就至少把原文与翻译显示出来**，并标记 [LyricsDocument.degraded]，
+ * 而不是整首歌空白。连行数组都找不到才返回 [LyricsParse.Unsupported]。
+ */
+fun parseLyrics(text: String, fallbackMusicId: Int): LyricsParse {
+    val root = text.parseJsonObjectOrNull() ?: return LyricsParse.NotJson
     val version = root.intOrNull("version") ?: 0
     val musicId = root.intOrNull("musicId") ?: fallbackMusicId
-    val renditionArray = root.arr("renditions") ?: return null
+    val revision = root.intOrNull("revision") ?: 0
+    val state = root.str("state").orEmpty()
 
-    // v4：翻译在译本里，按「renditionKey → {版本 → 平行字符串数组}」索引
+    // ── ① 已知结构：renditions[]（v3 / v4）──
+    // 注意：**只要 renditions 字段存在，就走结构化路径**，哪怕里面全被丢弃。
+    // 否则「格式支持但这份文档没有可用内容」会被误报成「格式不支持」。
+    val renditionArray = root.arr("renditions")
     val editionTranslations: Map<String, Map<String, List<String>>> =
         if (version >= 4) parseEditionTranslations(root) else emptyMap()
 
-    val renditions = renditionArray.mapNotNull { element ->
+    val renditions = renditionArray.orEmpty().mapNotNull { element ->
         val obj = element.asObj() ?: return@mapNotNull null
         val key = obj.str("key") ?: return@mapNotNull null
         val perRenditionTranslations = editionTranslations[key].orEmpty()
@@ -289,26 +337,93 @@ fun parseLyricsDocument(text: String, fallbackMusicId: Int): LyricsDocument? {
             rawLabel = obj.str("label").orEmpty().ifBlank { key },
             // ⚠️ 这里必须把 `performerId` 一起留下来（解析成数字当 key）。
             // 只留名字的话，界面就只剩下"按位置猜"一条路 —— 那正是之前的 bug。
-            performers = obj.arr("performers").orEmpty().mapNotNull { element ->
-                val po = element.asObj() ?: return@mapNotNull null
-                val name = po.str("name") ?: return@mapNotNull null
-                LyricsPerformer(id = parsePerformerId(po.str("performerId")), name = name)
-            },
+            performers = parsePerformers(obj),
             full = full,
             game = game,
-            credits = obj.arr("provenance").orEmpty().mapNotNull { parseCredit(it.asObj()) }.distinct(),
-            translators = obj.obj("translationCredits")?.let { credits ->
-                listOfNotNull(credits.str("translation"), credits.str("proofreading"))
-            }.orEmpty(),
+            credits = parseCredits(obj),
+            translators = parseTranslators(obj),
+        )
+    }
+    if (renditionArray != null) {
+        return LyricsParse.Ok(
+            LyricsDocument(musicId, revision, state, renditions, degraded = false),
+            degraded = false,
         )
     }
 
-    return LyricsDocument(
-        musicId = musicId,
-        revision = root.intOrNull("revision") ?: 0,
-        state = root.str("state").orEmpty(),
-        renditions = renditions,
+    // ── ② 兜底：在文档里找"行数组"（v1 的 lines 就在顶层）──
+    val lineElements = findLineArray(root)
+        ?: return LyricsParse.Unsupported(version, root.keys.sorted())
+    val lines = lineElements.mapIndexedNotNull { index, element ->
+        parseLyricsLine(element.asObj(), index, parallelTranslation = null)
+    }
+    if (lines.isEmpty()) return LyricsParse.Unsupported(version, root.keys.sorted())
+
+    val fallback = LyricsRendition(
+        key = "main",
+        kind = "",
+        // 兜底时不知道版本类型，如实写"默认版本"，不编成"SEKAI 版"
+        rawLabel = "默认版本",
+        performers = parsePerformers(root),
+        full = LyricsVersion(kind = "", lines = lines),
+        game = null,
+        credits = parseCredits(root),
+        translators = parseTranslators(root),
     )
+    return LyricsParse.Ok(
+        LyricsDocument(musicId, revision, state, listOf(fallback), degraded = true),
+        degraded = true,
+    )
+}
+
+/** 兼容旧调用点与测试：只要文档，失败就是 null。新代码请用 [parseLyrics] 以便区分失败原因。 */
+fun parseLyricsDocument(text: String, fallbackMusicId: Int): LyricsDocument? =
+    (parseLyrics(text, fallbackMusicId) as? LyricsParse.Ok)?.document
+
+/**
+ * 递归找第一个「看起来是歌词行的数组」：元素是对象、且其中多数带 `japanese` 字符串。
+ *
+ * 深度限制 4 层：既够覆盖 v1（顶层）与未来可能多包一层的结构，
+ * 又不会在畸形文档里乱跑。找不到就返回 null → 上层报 Unsupported。
+ */
+private fun findLineArray(element: JsonElement, depth: Int = 0): List<JsonElement>? {
+    if (depth > 4) return null
+    when (element) {
+        is JsonArray -> {
+            val objects = element.filterIsInstance<JsonObject>()
+            if (objects.isNotEmpty()) {
+                val withJapanese = objects.count { it.str("japanese") != null }
+                if (withJapanese >= maxOf(1, objects.size / 2)) return element
+            }
+            for (child in element) findLineArray(child, depth + 1)?.let { return it }
+        }
+        is JsonObject -> for (value in element.values) findLineArray(value, depth + 1)?.let { return it }
+        else -> Unit
+    }
+    return null
+}
+
+/** 演唱者名单。v3/v4 在 rendition 里；v1 没有（空列表）。 */
+private fun parsePerformers(obj: JsonObject): List<LyricsPerformer> =
+    obj.arr("performers").orEmpty().mapNotNull { element ->
+        val po = element.asObj() ?: return@mapNotNull null
+        val name = po.str("name") ?: return@mapNotNull null
+        LyricsPerformer(id = parsePerformerId(po.str("performerId")), name = name)
+    }
+
+/** 来源与许可。v3/v4 叫 `provenance`，**v1 叫 `attributions`**（两种都认）。 */
+private fun parseCredits(obj: JsonObject): List<LyricsCredit> {
+    val array = obj.arr("provenance") ?: obj.arr("attributions") ?: return emptyList()
+    return array.mapNotNull { parseCredit(it.asObj()) }.distinct()
+}
+
+/** 译者。v3/v4 在 `translationCredits` 里；**v1 是 `attribution` 字符串**。 */
+private fun parseTranslators(obj: JsonObject): List<String> {
+    obj.obj("translationCredits")?.let { credits ->
+        val list = listOfNotNull(credits.str("translation"), credits.str("proofreading"))
+        if (list.isNotEmpty()) return list
+    }
+    return listOfNotNull(obj.str("attribution")?.takeIf { it.isNotBlank() })
 }
 
 private fun parseCredit(obj: JsonObject?): LyricsCredit? {
@@ -359,21 +474,30 @@ private fun parseEditionTranslations(root: JsonObject): Map<String, Map<String, 
 private fun parseLyricsVersion(block: JsonObject, parallelTranslations: List<String>?): LyricsVersion? {
     val lines = block.arr("lines") ?: return null
     val parsed = lines.mapIndexedNotNull { index, element ->
-        val obj = element.asObj() ?: return@mapIndexedNotNull null
-        val japanese = obj.str("japanese") ?: return@mapIndexedNotNull null
-        // v3 用行内的 zh-CN；v4 用平行数组（下标对齐）。两个都没有就是没有翻译。
-        val inline = obj.str("zh-CN")?.takeIf { it.isNotBlank() }
-        val parallel = parallelTranslations?.getOrNull(index)?.takeIf { it.isNotBlank() }
-        LyricsLine(
-            id = obj.str("id").orEmpty(),
-            order = obj.intOrNull("order") ?: index,
-            japanese = japanese,
-            translation = inline ?: parallel,
-            segments = obj.arr("segments").orEmpty().mapNotNull { parseSegment(it.asObj()) },
-            stanzaBreakBefore = obj.bool("stanzaBreakBefore"),
-        )
+        parseLyricsLine(element.asObj(), index, parallelTranslations?.getOrNull(index))
     }
     return LyricsVersion(kind = block.obj("version")?.str("kind").orEmpty(), lines = parsed)
+}
+
+/**
+ * 一行歌词的解析 —— **结构化路径与兜底路径共用**。
+ *
+ * 兜底时 [parallelTranslation] 传 null（旧格式的翻译都在行内 `zh-CN` 里）。
+ */
+private fun parseLyricsLine(obj: JsonObject?, index: Int, parallelTranslation: String?): LyricsLine? {
+    if (obj == null) return null
+    val japanese = obj.str("japanese") ?: return null
+    // v3 用行内的 zh-CN；v4 用平行数组（下标对齐）。两个都没有就是没有翻译。
+    val inline = obj.str("zh-CN")?.takeIf { it.isNotBlank() }
+    val parallel = parallelTranslation?.takeIf { it.isNotBlank() }
+    return LyricsLine(
+        id = obj.str("id").orEmpty(),
+        order = obj.intOrNull("order") ?: index,
+        japanese = japanese,
+        translation = inline ?: parallel,
+        segments = obj.arr("segments").orEmpty().mapNotNull { parseSegment(it.asObj()) },
+        stanzaBreakBefore = obj.bool("stanzaBreakBefore"),
+    )
 }
 
 private fun parseSegment(obj: JsonObject?): LyricsSegment? {

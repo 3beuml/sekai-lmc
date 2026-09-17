@@ -1,6 +1,7 @@
 package com.pjsk.toolbox.data.music
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -74,17 +75,40 @@ class LyricsRepository(
             }
 
             val revision = entry?.revision ?: 0
-            val doc = runCatching { loadDocument(musicId, revision, forceRefresh) }
+            val parsed = runCatching { loadDocument(musicId, revision, forceRefresh) }
                 .getOrElse { return@withContext LyricsResult.Failed(it.message ?: "歌词加载失败") }
-                ?: return@withContext if (entry != null && entry.state == "satisfied_no_lyrics") {
+            when (parsed) {
+                // ⚠️ 这里以前是「解析不出来 → NoEntry」，于是界面把"格式不认识"说成
+                // 「这首曲子还没有歌词」—— 真相被藏起来了（#803 就是这么被误报的）。
+                // 现在如实分类：格式不认识就是"暂不支持"，并把 version 与顶层字段带出去。
+                is LyricsParse.Unsupported -> {
+                    Log.i(
+                        TAG,
+                        "歌词格式不认识：musicId=$musicId version=${parsed.version} 顶层字段=${parsed.topFields}",
+                    )
+                    LyricsResult.Unsupported(parsed.version, parsed.topFields)
+                }
+
+                LyricsParse.NotJson -> {
+                    Log.i(TAG, "歌词正文不是 JSON：musicId=$musicId")
+                    if (entry == null) LyricsResult.NoEntry else LyricsResult.Failed("歌词内容不是 JSON")
+                }
+
+                is LyricsParse.Ok -> {
+                    if (parsed.degraded) {
+                        Log.i(TAG, "歌词走兜底解析：musicId=$musicId（格式不是已知的 v1/v3/v4）")
+                    }
+                    when (parsed.document.state) {
+                        "incomplete" -> LyricsResult.Incomplete(parsed.document)
+                        else -> LyricsResult.Ok(parsed.document, entry)
+                    }
+                }
+
+                null -> if (entry != null && entry.state == "satisfied_no_lyrics") {
                     LyricsResult.NoLyrics(null)
                 } else {
                     LyricsResult.NoEntry
                 }
-
-            when (doc.state) {
-                "incomplete" -> LyricsResult.Incomplete(doc)
-                else -> LyricsResult.Ok(doc, entry)
             }
         }
 
@@ -107,38 +131,42 @@ class LyricsRepository(
     }
 
     /**
-     * 正文：`(musicId, revision)` 命中磁盘缓存就直接用，否则联网。
+     * 载入并解析正文。
+     *
+     * 返回值语义（这三态以前被压成了两种，害我们误报过 #803）：
+     *  - `null`：**文档根本拿不到**（404 / 网络失败 / 缓存里也没有）
+     *  - [LyricsParse.Ok]：解析成功（`degraded = true` 表示走的兜底路径）
+     *  - [LyricsParse.Unsupported] / [LyricsParse.NotJson]：内容拿到了但**解析不了**
      *
      * ⚠️ 拿不到索引（revision=0）时**不能**信任磁盘副本 —— 分不清缓存是哪一版，
      * 这时一律以网络为准（拿不到就退缓存）。
      */
-    private fun loadDocument(musicId: Int, revision: Int, forceRefresh: Boolean): LyricsDocument? {
+    private fun loadDocument(musicId: Int, revision: Int, forceRefresh: Boolean): LyricsParse? {
         val cacheFile = File(dir, "music_${musicId}_rev$revision.json")
 
         if (!forceRefresh && revision > 0 && cacheFile.isFile) {
-            runCatching { parseLyricsDocument(cacheFile.readText(), musicId) }
-                .getOrNull()
-                ?.takeIf { it.revision == revision }
-                ?.let { return it }
+            val cached = runCatching { parseLyrics(cacheFile.readText(), musicId) }.getOrNull()
+            val cachedDoc = (cached as? LyricsParse.Ok)?.document
+            if (cachedDoc != null && cachedDoc.revision == revision) return cached
+            // 缓存里是坏内容或旧内容 → 往下走重新联网（不要因为缓存坏了就一直显示"没有"）
         }
 
         val url = "$DOC_BASE/music_$musicId.json" + if (revision > 0) "?rev=$revision" else ""
         val text = fetchText(url)
         if (text != null) {
-            val doc = runCatching { parseLyricsDocument(text, musicId) }.getOrNull()
-            if (doc != null) {
-                // 只有 revision 对得上（或索引未知）才落盘，避免把旧版当新版缓存
-                if (revision <= 0 || doc.revision == revision) {
-                    runCatching { cacheFile.writeText(text) }
-                }
-                return doc
+            val parsed = runCatching { parseLyrics(text, musicId) }.getOrNull()
+            val doc = (parsed as? LyricsParse.Ok)?.document
+            // 只有 revision 对得上（或索引未知）才落盘，避免把旧版当新版缓存
+            if (doc != null && (revision <= 0 || doc.revision == revision)) {
+                runCatching { cacheFile.writeText(text) }
             }
+            if (parsed != null) return parsed
         }
         // 网络失败/404：退回磁盘上任意一版，好过什么都不显示
         return runCatching {
             dir.listFiles { f -> f.name.startsWith("music_${musicId}_rev") }
                 ?.maxByOrNull { it.lastModified() }
-                ?.let { parseLyricsDocument(it.readText(), musicId) }
+                ?.let { parseLyrics(it.readText(), musicId) }
         }.getOrNull()
     }
 
@@ -157,6 +185,9 @@ class LyricsRepository(
     }.getOrNull()
 
     private companion object {
+        /** logcat 标签：格式不认识 / 走兜底解析时打在这里，便于从外部核对。 */
+        const val TAG = "LyricsRepo"
+
         const val DOC_BASE = "https://translation.exmeaning.com/files/translation/lyrics"
         const val INDEX_URL = "$DOC_BASE/index.json"
     }
