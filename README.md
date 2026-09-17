@@ -13,7 +13,7 @@
 
 | | |
 | --- | --- |
-| **Android APK** | 见 [Releases](https://github.com/3beuml/sekai-lmc/releases)（当前 `0.1.3`，约 16 MB，需要 **Android 8.0** 及以上），下载 `app-release.apk` 侧载 |
+| **Android APK** | 见 [Releases](https://github.com/3beuml/sekai-lmc/releases)（当前 `0.1.5`，约 16 MB，需要 **Android 8.0** 及以上），下载 `app-release.apk` 侧载 |
 | **源代码** | 本仓库；每个 Release 页面也会自动附 `Source code (zip / tar.gz)` |
 
 安装：侧载 APK，首次需要在系统里允许「安装未知来源应用」。

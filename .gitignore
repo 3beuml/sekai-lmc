@@ -35,6 +35,12 @@ docs/
 # 给 AI 会话的入口说明（指向 docs/PROJECT_MEMORY.md，那份文件不公开，所以它也不公开）
 AGENTS.md
 
+# 凭据文件：令牌正常放在仓库外（Desktop\Deepseek\ 下），这里再兜一层，
+# 万一被误放进仓库也不会被提交
+.gh_token*
+.gt_token*
+*_token.txt
+
 # Kotlin 编译器会话临时文件（0 字节，每次构建都会变）
 .kotlin/
 
