@@ -15,16 +15,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -41,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -50,11 +53,20 @@ import coil.compose.AsyncImage
 import com.pjsk.toolbox.PjskApp
 import com.pjsk.toolbox.data.card.Card
 import com.pjsk.toolbox.data.card.displayNameFor
+import com.pjsk.toolbox.data.card.supplyType
+import com.pjsk.toolbox.data.home.GachaTag
 import com.pjsk.toolbox.data.home.HomeGacha
+import com.pjsk.toolbox.data.home.gachaFocusCardIds
+import com.pjsk.toolbox.data.home.gachaRestCardIds
+import com.pjsk.toolbox.data.home.gachaTagsOf
+import com.pjsk.toolbox.data.home.rowTagsOf
+import com.pjsk.toolbox.data.home.statusOfGacha
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.story.StoryStatus
 import com.pjsk.toolbox.ui.common.RowDivider
+import com.pjsk.toolbox.ui.common.TagChip
+import com.pjsk.toolbox.ui.common.TagTone
 
 /**
  * 卡池。
@@ -62,6 +74,19 @@ import com.pjsk.toolbox.ui.common.RowDivider
  * **列表与详情在同一个界面里**（内部用 `selected` 切换）：两者结构都很简单，
  * 而且从详情返回列表不该丢滚动位置 —— 用一个 `LazyColumn` 状态最省事，
  * 也省掉一条路由。
+ *
+ * ── 池内卡牌的排布（2026-09-19 改）──
+ *
+ * 原来就是把 `gachas.gc` 原样铺出来，而这个字段实测 **1002 / 1004 个池就是卡 id 升序**，
+ * 于是每个池子打开都是 `#2 #3 #4 #6 #7 #10…`，几十个池子长得一模一样（用户原话：
+ * 「好几个卡池里都按顺序排的，感觉差异化不大」）。
+ *
+ * 现在分两段：
+ *  - **重点卡**（`UP + 本池首发`）铺在最前，带角标。池内卡数中位 150 张，而重点卡中位
+ *    只有 3 张（978 / 1004 个池 ≤10 张）—— 这才是这个池子区别于别的池子的部分；
+ *  - **其余卡**（往期池早就出现过的老卡，占 97%）默认**折叠**成一行，点开才铺。
+ *    折叠不是隐藏数据：那一行必须写明张数（「其余 146 张」），
+ *    不然用户会以为池子里就 3 张卡。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -89,12 +114,17 @@ fun GachaScreen(
     val characters by container.cardRepository.characters.collectAsState(initial = emptyList())
     var tagFilter by rememberSaveable { mutableStateOf(GachaTag.ALL) }
     val cardById = remember(cards) { cards.associateBy { it.id } }
+    // 限定卡的 id 集合：池子的「限定」标签要按**池里有没有限定卡**算，
+    // 口径来自 cardSupplies（见 CardSupplyType），不是按名字猜的。
+    val limitedCardIds = remember(cards) {
+        cards.filter { it.supplyType?.limited == true }.mapTo(HashSet()) { it.id }
+    }
     val characterNames = remember(characters) {
         characters.mapNotNull { it.nameJa?.takeIf { n -> n.isNotBlank() } }.toSet()
     }
-    val tagMap = remember(gachas, cardById, characterNames) {
+    val tagMap = remember(gachas, limitedCardIds, characterNames) {
         val now = System.currentTimeMillis()
-        gachas.associate { it.id to tagsOfGacha(it, cardById, characterNames, now) }
+        gachas.associate { it.id to gachaTagsOf(it, { id -> id in limitedCardIds }, characterNames, now) }
     }
     val visibleGachas = remember(gachas, tagMap, tagFilter) {
         if (tagFilter == GachaTag.ALL) gachas
@@ -102,6 +132,30 @@ fun GachaScreen(
     }
 
     val current = remember(gachas, selectedId) { gachas.firstOrNull { it.id == selectedId } }
+    // 「其余卡」的展开状态：**刻意用 remember（不是 rememberSaveable）**——
+    // 它是纯浏览态，换个池子或从卡牌详情返回时收起才是合理的默认。
+    var restExpanded by remember(current?.id) { mutableStateOf(false) }
+    val focusIds = remember(current, cardById) {
+        current?.let { gacha ->
+            gachaFocusCardIds(
+                pool = gacha.cardIds,
+                upCardIds = gacha.upCardIds,
+                debutCardIds = gacha.debutCardIds,
+                releaseAtOf = { id -> cardById[id]?.releaseAt ?: Long.MIN_VALUE },
+            )
+        }.orEmpty()
+    }
+    val restIds = remember(current, focusIds, cardById) {
+        current?.let { gacha ->
+            gachaRestCardIds(
+                pool = gacha.cardIds,
+                focusCardIds = focusIds,
+                releaseAtOf = { id -> cardById[id]?.releaseAt ?: Long.MIN_VALUE },
+            )
+        }.orEmpty()
+    }
+    val upIds = remember(current) { current?.upCardIds.orEmpty().toHashSet() }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -121,7 +175,7 @@ fun GachaScreen(
                 // ── 第 1 层：卡池列表 + 分类筛选 ──
                 Column(modifier = Modifier.fillMaxSize()) {
                     // 分类筛选：按 `gachas.gachaType` 分。
-                    // 实测 1001 个池的分布：ceil 754 / normal 223 / gift 17 / beginner 7。
+                    // 实测 1004 个池的分布：ceil 757 / normal 223 / gift 17 / beginner 7。
                     LazyRow(
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
@@ -151,13 +205,18 @@ fun GachaScreen(
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                     ) {
                         items(visibleGachas, key = { it.id }) { gacha ->
-                            GachaRow(gacha = gacha, region = region, onClick = { selectedId = gacha.id })
+                            GachaRow(
+                                gacha = gacha,
+                                region = region,
+                                tags = rowTagsOf(tagMap[gacha.id] ?: emptySet()),
+                                onClick = { selectedId = gacha.id },
+                            )
                             RowDivider()
                         }
                     }
                 }
             } else {
-                // ── 第 2 层：卡池详情 + 池内卡牌网格 ──
+                // ── 第 2 层：卡池详情 = 重点卡 + 折叠的其余卡 ──
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = 120.dp),
                     modifier = Modifier.fillMaxSize(),
@@ -165,7 +224,7 @@ fun GachaScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
                         Column {
                             AsyncImage(
                                 model = AssetUrls.gachaLogo(region, current.assetbundleName),
@@ -186,24 +245,92 @@ fun GachaScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
+                            val tags = rowTagsOf(tagMap[current.id] ?: emptySet())
+                            if (tags.isNotEmpty()) {
+                                Spacer(Modifier.height(6.dp))
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    tags.forEach { tag -> GachaTagChip(tag) }
+                                }
+                            }
                             Spacer(Modifier.height(10.dp))
                             Text(
-                                text = "卡池内容（${current.cardIds.size} 张）",
+                                text = "本池重点 ${focusIds.size} 张 · 池内共 ${current.cardIds.size} 张",
                                 style = MaterialTheme.typography.titleSmall,
                                 color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = "重点 = 卡池 UP（官方 pickups）+ 本池首发（这张卡第一次能抽到就是在这里）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Spacer(Modifier.height(8.dp))
                         }
                     }
-                    items(current.cardIds, key = { it }) { cardId ->
-                        val card = cardById[cardId]
+
+                    items(focusIds, key = { it }) { cardId ->
                         GachaCardCell(
-                            card = card,
+                            card = cardById[cardId],
                             region = region,
                             fallbackId = cardId,
-                            name = card?.displayNameFor(nameLanguage),
+                            name = cardById[cardId]?.displayNameFor(nameLanguage),
+                            up = cardId in upIds,
+                            debut = cardId in current.debutCardIds,
                             onClick = { onOpenCard(cardId) },
                         )
+                    }
+
+                    // 「其余卡」：折叠成一行。往期池早就出现过的老卡占池内 97%，
+                    // 一屏铺不完、而且每个池子都长这样，所以默认收起。
+                    if (restIds.isNotEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            Column {
+                                Spacer(Modifier.height(6.dp))
+                                RowDivider()
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { restExpanded = !restExpanded }
+                                        .padding(vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "其余 ${restIds.size} 张（往期卡池已出现）",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    Text(
+                                        text = if (restExpanded) "收起" else "展开",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.KeyboardArrowDown,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.rotate(if (restExpanded) 180f else 0f),
+                                    )
+                                }
+                                if (restExpanded) Spacer(Modifier.height(4.dp))
+                            }
+                        }
+                    }
+                    if (restExpanded) {
+                        items(restIds, key = { it }) { cardId ->
+                            GachaCardCell(
+                                card = cardById[cardId],
+                                region = region,
+                                fallbackId = cardId,
+                                name = cardById[cardId]?.displayNameFor(nameLanguage),
+                                up = false,
+                                debut = false,
+                                onClick = { onOpenCard(cardId) },
+                            )
+                        }
                     }
                 }
             }
@@ -212,68 +339,19 @@ fun GachaScreen(
 }
 
 /**
- * 卡池分类筛选。
+ * 列表行上的一枚卡池标签。
  *
- * 口径用 `gachas.gachaType`（数据自带、1001 个池全覆盖）：
- * 天井池 754 / 普通池 223 / 赠送池 17 / 新手池 7。
- * 名字里的 `[復刻]`（260 个）、周年纪念、角色生日池这些是**另一套口径**，
- * 要按它们筛的话得解析名字，留到以后。
+ * 口径见 `data/home/GachaTags.kt`：限定是「池内有没有限定卡」，复刻是名字带 `[復刻]`，
+ * 生日池看名字开头的角色名，纪念看周年/完结章。配色按重要程度分（见 TagChip）：
+ * 限定用 primary，其余（复刻 / 生日池 / 纪念 / 一回限定）用 secondaryContainer ——
+ * 能被看见，但不跟「限定」抢眼。
  */
-private enum class GachaTag(val label: String) {
-    ALL("全部"),
-    LIMITED("限定"),
-    PERMANENT("常驻"),
-    RERUN("复刻"),
-    BIRTHDAY("生日池"),
-    ANNIVERSARY("纪念"),
-    ONCE_ONLY("一回限定"),
-    RUNNING("进行中"),
-    ENDED("已结束"),
-}
-
-/**
- * 卡池里的卡是不是「限定」。
- *
- * 取值来自 `cardSupplies.json`（实测 7 行）：
- * 1 normal 常驻 / 2 birthday 生日 / 3 term_limited 期间限定 /
- * 4 colorful_festival_limited / 5 bloom_festival_limited /
- * 6 unit_event_limited / 7 collaboration_limited。
- * 也就是 **3~7 都是限定**，1、2 不是。
- */
-private val LIMITED_SUPPLY_IDS = setOf(3, 4, 5, 6, 7)
-
-/**
- * 算出一个卡池身上的标签。**一个池可以同时是「限定 + 复刻 + 进行中」**，
- * 所以这里返回集合，筛选时是「包含该标签」而不是互斥单选。
- */
-private fun tagsOfGacha(
-    gacha: HomeGacha,
-    cardById: Map<Int, Card>,
-    characterNames: Set<String>,
-    now: Long,
-): Set<GachaTag> {
-    val tags = mutableSetOf<GachaTag>()
-    val limited = gacha.cardIds.any { cardById[it]?.supplyId in LIMITED_SUPPLY_IDS }
-    if (limited) tags += GachaTag.LIMITED else tags += GachaTag.PERMANENT
-    val name = gacha.name
-    if (name.contains("[復刻]")) tags += GachaTag.RERUN
-    if (name.contains("[1回限定]")) tags += GachaTag.ONCE_ONLY
-    if (name.contains("周年記念") || name.contains("フィナーレチャプター")) tags += GachaTag.ANNIVERSARY
-    // 生日池：名字方括号里就是角色名（实测 `[桐谷遥]…` 这种，每个角色 6 个）
-    Regex("^[\\[【]([^\\]】]+)[\\]】]").find(name)?.groupValues?.get(1)?.let { tag ->
-        if (tag in characterNames) tags += GachaTag.BIRTHDAY
-    }
-    if (now in gacha.startAt until gacha.endAt) tags += GachaTag.RUNNING else tags += GachaTag.ENDED
-    return tags
-}
-/** 卡池的进行状态（按日期算，和活动剧情同一套规则）。 */
-private fun statusOfGacha(gacha: HomeGacha): StoryStatus {
-    val now = System.currentTimeMillis()
-    return when {
-        now < gacha.startAt -> StoryStatus.UPCOMING
-        now >= gacha.endAt -> StoryStatus.ENDED
-        else -> StoryStatus.RUNNING
-    }
+@Composable
+private fun GachaTagChip(tag: GachaTag) {
+    TagChip(
+        text = tag.label,
+        tone = if (tag == GachaTag.LIMITED) TagTone.ACCENT else TagTone.MUTED,
+    )
 }
 
 /** `2026-09-21` 这种短日期。 */
@@ -309,8 +387,14 @@ private fun StoryStatusBadge(status: StoryStatus) {
         )
     }
 }
+
 @Composable
-private fun GachaRow(gacha: HomeGacha, region: ServerRegion, onClick: () -> Unit) {
+private fun GachaRow(
+    gacha: HomeGacha,
+    region: ServerRegion,
+    tags: List<GachaTag>,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -345,6 +429,17 @@ private fun GachaRow(gacha: HomeGacha, region: ServerRegion, onClick: () -> Unit
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            // 标签小签：以前这些标签**只用来筛选**，行上什么都不显示，
+            // 于是「哪个池是复刻的」在列表里根本看不出来。
+            if (tags.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    tags.forEach { tag -> GachaTagChip(tag) }
+                }
+            }
         }
         Text(
             text = "${gacha.cardIds.size} 张",
@@ -359,6 +454,11 @@ private fun GachaRow(gacha: HomeGacha, region: ServerRegion, onClick: () -> Unit
  *
  * 卡面用**列表用的预览档**（800px），点进去是卡牌详情 —— 和「图鉴」里的点击行为一致。
  * 卡池里的卡 id 理论上都能在卡表里找到；找不到时只显示编号，不假装有卡面。
+ *
+ * 左上角挂角标（右上要留给属性图标的位置已被卡面本身的构图占掉，左上是空的）：
+ *  - `UP`：这个池子的官方 pickups，也就是池子在卖的那几张；
+ *  - `首发`：这张卡第一次能在卡池里抽到就是在本池。
+ * 两者可以同时成立，所以是「最多两枚」而不是互斥的一枚。
  */
 @Composable
 private fun GachaCardCell(
@@ -366,6 +466,8 @@ private fun GachaCardCell(
     region: ServerRegion,
     fallbackId: Int,
     name: String?,
+    up: Boolean,
+    debut: Boolean,
     onClick: () -> Unit,
 ) {
     Column(
@@ -373,31 +475,40 @@ private fun GachaCardCell(
             .clip(RoundedCornerShape(8.dp))
             .clickable(onClick = onClick),
     ) {
-        if (card != null) {
-            AsyncImage(
-                model = AssetUrls.cardPreview(region, card.assetbundleName, trained = false),
-                contentDescription = null,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1.68f)
-                    .clip(RoundedCornerShape(6.dp)),
-                contentScale = ContentScale.Crop,
-            )
-        } else {
-            // 卡池里有极少数卡不在卡表里（例如已下线的），给个占位而不是空白
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1.68f)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "#$fallbackId",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Box(modifier = Modifier.fillMaxWidth().aspectRatio(1.68f)) {
+            if (card != null) {
+                AsyncImage(
+                    model = AssetUrls.cardPreview(region, card.assetbundleName, trained = false),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(6.dp)),
+                    contentScale = ContentScale.Crop,
                 )
+            } else {
+                // 卡池里有极少数卡不在卡表里（例如已下线的），给个占位而不是空白
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "#$fallbackId",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (up || debut) {
+                Row(
+                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    if (up) TagChip(text = "UP", tone = TagTone.HOT)
+                    if (debut) TagChip(text = "首发", tone = TagTone.MUTED)
+                }
             }
         }
         Spacer(Modifier.height(4.dp))

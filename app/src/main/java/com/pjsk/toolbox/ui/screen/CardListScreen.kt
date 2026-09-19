@@ -75,14 +75,17 @@ import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
 import com.pjsk.toolbox.data.card.CardQuery
 import com.pjsk.toolbox.data.card.CardSort
+import com.pjsk.toolbox.data.card.CardSupplyType
 import com.pjsk.toolbox.data.card.CardUnit
 import com.pjsk.toolbox.data.card.FALLBACK_RARITY_CAPS
 import com.pjsk.toolbox.data.card.PjskCharacter
 import com.pjsk.toolbox.data.card.displayNameFor
 import com.pjsk.toolbox.data.card.filterCards
+import com.pjsk.toolbox.data.card.listTagLabel
 import com.pjsk.toolbox.data.card.maxTotal
 import com.pjsk.toolbox.data.card.secondaryNameFor
 import com.pjsk.toolbox.data.card.starsOf
+import com.pjsk.toolbox.data.card.supplyType
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.settings.NameLanguage
@@ -93,6 +96,8 @@ import com.pjsk.toolbox.ui.common.CardListSkeleton
 import com.pjsk.toolbox.ui.common.CardQuerySaver
 import com.pjsk.toolbox.ui.common.EmptyState
 import com.pjsk.toolbox.ui.common.PrefetchCardImages
+import com.pjsk.toolbox.ui.common.TagChip
+import com.pjsk.toolbox.ui.common.TagTone
 import com.pjsk.toolbox.ui.common.listArtUrls
 import com.pjsk.toolbox.ui.common.rememberEmptyConfirmed
 import com.pjsk.toolbox.util.moveMatchesFirst
@@ -171,6 +176,12 @@ fun CardListScreen(
     // VIRTUAL SINGER 组里，而「每个团里的虚拟歌手」是玩家真实的心智模型。
     val characterGroups = remember(cards, characters) {
         characterGroupsOf(cards, characters)
+    }
+
+    // 「卡池类型」每一项有多少张卡（面板上直接写出来）
+    val supplyCounts = remember(cards) {
+        cards.groupingBy { it.supplyType }.eachCount().filterKeys { it != null }
+            .mapKeys { (key, _) -> key!! }
     }
 
     Scaffold(
@@ -314,8 +325,7 @@ fun CardListScreen(
                         totalPower = card.maxTotal(rarityCaps),
                         onClick = { onOpenDetail(card.id) },
                     )
-                }
-            }
+                }            }
         }
     }
 
@@ -325,6 +335,7 @@ fun CardListScreen(
             onChange = { query = it },
             characterGroups = characterGroups,
             nameLanguage = nameLanguage,
+            supplyCounts = supplyCounts,
             matchedCount = visible.size,
             totalCount = cards.size,
             onDismiss = { showFilterSheet = false },
@@ -408,6 +419,16 @@ private fun CardTile(
                     attr = card.attr,
                     modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
                     size = 18.dp,
+                )
+            }
+
+            // 左上：「限定」角标（右上被属性图标占了、左下是星星，只剩这里空着）。
+            // 只对限定卡挂这一枚，常驻和生日卡不挂 —— 见 Card.listTagLabel 的说明。
+            card.listTagLabel?.let { label ->
+                TagChip(
+                    text = label,
+                    tone = TagTone.ACCENT,
+                    modifier = Modifier.align(Alignment.TopStart).padding(6.dp),
                 )
             }
 
@@ -504,6 +525,7 @@ private fun CardFilterSheet(
     onChange: (CardQuery) -> Unit,
     characterGroups: List<CharacterGroup>,
     nameLanguage: NameLanguage,
+    supplyCounts: Map<CardSupplyType, Int>,
     matchedCount: Int,
     totalCount: Int,
     onDismiss: () -> Unit,
@@ -629,6 +651,32 @@ private fun CardFilterSheet(
                         )
                     }
                 }
+            }
+
+            FilterGroup("卡池类型") {
+                // 张数直接写在 chip 上：光看「联动限定」四个字没法判断这一项值不值得点，
+                // 「82 张」才有信息量。计数按**全部卡**算（不随其它维度变），
+                // 否则「还有几张」会随着筛选互相牵动，越点越难看懂。
+                CardSupplyType.entries.moveMatchesFirst { it in query.supplyTypes }
+                    .forEach { supply ->
+                        FilterChip(
+                            selected = supply in query.supplyTypes,
+                            onClick = {
+                                onChange(
+                                    query.copy(
+                                        supplyTypes = if (supply in query.supplyTypes) {
+                                            query.supplyTypes - supply
+                                        } else {
+                                            query.supplyTypes + supply
+                                        },
+                                    ),
+                                )
+                            },
+                            label = {
+                                Text("${supply.label} ${supplyCounts[supply] ?: 0}")
+                            },
+                        )
+                    }
             }
 
             FilterGroup("排序") {

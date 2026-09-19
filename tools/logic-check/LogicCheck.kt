@@ -2,6 +2,7 @@ import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
 import com.pjsk.toolbox.data.card.CardQuery
 import com.pjsk.toolbox.data.card.CardSort
+import com.pjsk.toolbox.data.card.CardSupplyType
 import com.pjsk.toolbox.data.card.CardUnit
 import com.pjsk.toolbox.data.card.FALLBACK_RARITY_CAPS
 import com.pjsk.toolbox.data.card.RarityCap
@@ -16,9 +17,20 @@ import com.pjsk.toolbox.data.card.characterNameMap
 import com.pjsk.toolbox.data.card.parseCharacter
 import com.pjsk.toolbox.data.card.parseSkill
 import com.pjsk.toolbox.data.card.filterCards
+import com.pjsk.toolbox.data.card.listTagLabel
+import com.pjsk.toolbox.data.card.supplyType
 import com.pjsk.toolbox.data.card.trainedMaxLevel
 import com.pjsk.toolbox.data.db.MasterRowEntity
+import com.pjsk.toolbox.data.home.GachaTag
+import com.pjsk.toolbox.data.home.HomeGacha
 import com.pjsk.toolbox.data.home.HomeMusic
+import com.pjsk.toolbox.data.home.debutCardIdsByGacha
+import com.pjsk.toolbox.data.home.gachaFocusCardIds
+import com.pjsk.toolbox.data.home.gachaRestCardIds
+import com.pjsk.toolbox.data.home.gachaTagsOf
+import com.pjsk.toolbox.data.home.isRerunGachaName
+import com.pjsk.toolbox.data.home.rowTagsOf
+import com.pjsk.toolbox.data.home.statusOfGacha
 import com.pjsk.toolbox.data.music.LyricsIndexEntry
 import com.pjsk.toolbox.data.music.MusicCategory
 import com.pjsk.toolbox.data.music.MusicDifficultyKind
@@ -113,6 +125,7 @@ import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.remote.TableCatalog
 import com.pjsk.toolbox.data.story.StoryAssetKind
 import com.pjsk.toolbox.data.sync.DatapackImportOrder
+import com.pjsk.toolbox.data.sync.DatapackSchema
 import com.pjsk.toolbox.data.sync.SyncDecision
 import com.pjsk.toolbox.data.sync.SyncManager
 import java.io.File
@@ -604,6 +617,248 @@ fun main(args: Array<String>) {
         cardQueryFromSaveText(CardQuery(characterIds = setOf(21)).toSaveText().replace("21", "abc"))
             .characterIds,
         emptySet<Int>(),
+    )
+
+    // ─────────────────────────────────────────────────────────
+    section("7c. 卡池类型标签（cardSupplies）与卡池内的重点卡排序")
+    // ─────────────────────────────────────────────────────────
+    // 这一节防的是「标签靠猜」。限定 / 常驻必须来自官方 cardSupplies.json
+    // （7 行，cards.cardSupplyId 指过去），而不是按卡名、稀有度或发售时间推。
+    // 另一半防的是卡池详情那次改动：重点卡（UP + 首发）要在最前、其余卡折叠，
+    // 一旦排序写错，现象只是「看着有点怪」，不会报错 —— 正好该由自检兜住。
+    checkEq("类型 1 = 常驻", CardSupplyType.of(1)?.label, "常驻")
+    checkEq("类型 2 = 生日", CardSupplyType.of(2)?.label, "生日")
+    checkEq("类型 3 = 期间限定", CardSupplyType.of(3)?.label, "期间限定")
+    checkEq("类型 4 = CF 限定", CardSupplyType.of(4)?.label, "CF 限定")
+    checkEq("类型 5 = BF 限定", CardSupplyType.of(5)?.label, "BF 限定")
+    checkEq("类型 6 = 组合活动限定", CardSupplyType.of(6)?.label, "组合活动限定")
+    checkEq("类型 7 = 联动限定", CardSupplyType.of(7)?.label, "联动限定")
+    checkEq("未知类型 id 不给标签（官方以后新增一类时不假装认识）", CardSupplyType.of(99), null)
+    checkEq("缺 cardSupplyId 的卡没有类型", CardSupplyType.of(null), null)
+    checkEq(
+        "只有 3~7 算限定（生日卡不算限定）",
+        CardSupplyType.entries.filter { it.limited }.map { it.id },
+        listOf(3, 4, 5, 6, 7),
+    )
+
+    val supplySamples = listOf(
+        card.copy(id = 1, supplyId = 1),
+        card.copy(id = 2, supplyId = 2),
+        card.copy(id = 3, supplyId = 3),
+        card.copy(id = 4, supplyId = 7),
+        card.copy(id = 5, supplyId = null),
+    )
+    checkEq(
+        "图鉴角标：只给限定卡挂「限定」",
+        supplySamples.filter { it.listTagLabel != null }.map { it.id },
+        listOf(3, 4),
+    )
+    checkEq("图鉴角标：常驻卡不挂签", supplySamples[0].listTagLabel, null)
+    checkEq("图鉴角标：生日卡不挂签（稀有度筛选里已经有生日）", supplySamples[1].listTagLabel, null)
+    checkEq("卡牌详情用完整类型名，不用「限定」两个字", supplySamples[3].supplyType?.label, "联动限定")
+    checkEq(
+        "按卡池类型筛选（同维多选取或）",
+        filterCards(
+            supplySamples,
+            CardQuery(supplyTypes = setOf(CardSupplyType.NORMAL, CardSupplyType.COLLABORATION_LIMITED)),
+            caps,
+        ).map { it.id },
+        listOf(1, 4),
+    )
+    checkEq(
+        "缺 cardSupplyId 的卡不会被当成常驻混进「常驻」",
+        filterCards(supplySamples, CardQuery(supplyTypes = setOf(CardSupplyType.NORMAL)), caps)
+            .map { it.id },
+        listOf(1),
+    )
+    val supplyQuery = CardQuery(supplyTypes = setOf(CardSupplyType.BIRTHDAY, CardSupplyType.TERM_LIMITED))
+    checkEq(
+        "卡池类型也进了跨界面保存（往返一致）",
+        cardQueryFromSaveText(supplyQuery.toSaveText()),
+        supplyQuery,
+    )
+
+    // ── 卡池身上的标签 ──
+    val gachaNow = 1_700_000_000_000L
+    val gachaLimited = setOf(3, 4)
+    fun gachaSample(
+        id: Int = 1,
+        name: String = "テストガチャ",
+        cards: List<Int> = listOf(1, 3),
+        startAt: Long = gachaNow - 1_000,
+        endAt: Long = gachaNow + 1_000,
+    ) = HomeGacha(
+        id = id,
+        name = name,
+        assetbundleName = "bundle_$id",
+        startAt = startAt,
+        endAt = endAt,
+        gachaType = "ceil",
+        cardIds = cards,
+    )
+
+    checkEq(
+        "池里有限定卡 → 限定",
+        GachaTag.LIMITED in gachaTagsOf(gachaSample(), { it in gachaLimited }, emptySet(), gachaNow),
+        true,
+    )
+    checkEq(
+        "池里全是常驻卡 → 常驻（且不是限定）",
+        gachaTagsOf(gachaSample(cards = listOf(1, 2)), { it in gachaLimited }, emptySet(), gachaNow),
+        setOf(GachaTag.PERMANENT, GachaTag.RUNNING),
+    )
+    checkEq(
+        "名字带 [復刻] → 复刻（实测 260 个池全是这一种写法）",
+        isRerunGachaName("[復刻]絶望の雨すら笑ってガチャ"),
+        true,
+    )
+    checkEq("裸词「復刻」不算复刻（数据里没有这种写法）", isRerunGachaName("復刻ガチャ"), false)
+    checkEq(
+        "一回限定池",
+        GachaTag.ONCE_ONLY in gachaTagsOf(
+            gachaSample(name = "[1回限定]新春ガチャ"),
+            { it in gachaLimited },
+            emptySet(),
+            gachaNow,
+        ),
+        true,
+    )
+    checkEq(
+        "周年纪念池（数据里没有字段，只能按名字认）",
+        GachaTag.ANNIVERSARY in gachaTagsOf(
+            gachaSample(name = "2周年記念ガチャ"),
+            { it in gachaLimited },
+            emptySet(),
+            gachaNow,
+        ),
+        true,
+    )
+    checkEq(
+        "生日池：名字开头的方括号里是角色名才算",
+        GachaTag.BIRTHDAY in gachaTagsOf(
+            gachaSample(name = "[桐谷遥]バースデーガチャ"),
+            { it in gachaLimited },
+            setOf("桐谷遥"),
+            gachaNow,
+        ),
+        true,
+    )
+    checkEq(
+        "方括号里不是角色名（例如 [復刻]）不算生日池",
+        GachaTag.BIRTHDAY in gachaTagsOf(
+            gachaSample(name = "[復刻]桐谷遥ガチャ"),
+            { it in gachaLimited },
+            setOf("桐谷遥"),
+            gachaNow,
+        ),
+        false,
+    )
+    checkEq(
+        "状态按日期算：进行中",
+        statusOfGacha(gachaSample(), gachaNow).name,
+        "RUNNING",
+    )
+    checkEq(
+        "状态按日期算：已结束",
+        statusOfGacha(gachaSample(endAt = gachaNow - 1), gachaNow).name,
+        "ENDED",
+    )
+    checkEq(
+        "状态按日期算：未开始",
+        statusOfGacha(gachaSample(startAt = gachaNow + 1), gachaNow).name,
+        "UPCOMING",
+    )
+    checkEq(
+        "行上的小签不重复状态徽章（进行中 / 已结束 不挂签）",
+        rowTagsOf(setOf(GachaTag.LIMITED, GachaTag.RUNNING, GachaTag.ENDED)),
+        listOf(GachaTag.LIMITED),
+    )
+    checkEq(
+        "行上的小签顺序固定（限定 → 复刻 → 生日池 → 纪念 → 一回限定）",
+        rowTagsOf(
+            setOf(GachaTag.ONCE_ONLY, GachaTag.RERUN, GachaTag.LIMITED, GachaTag.BIRTHDAY),
+        ),
+        listOf(GachaTag.LIMITED, GachaTag.RERUN, GachaTag.BIRTHDAY, GachaTag.ONCE_ONLY),
+    )
+
+    // ── 首发卡：跨池子按开始时间算 ──
+    val debutPools = listOf(
+        gachaSample(id = 1, startAt = 1_000, cards = listOf(1, 2)),
+        gachaSample(id = 2, startAt = 2_000, cards = listOf(2, 3)),
+        gachaSample(id = 3, startAt = 3_000, cards = listOf(1, 3, 4)),
+        // 第 4 个池子里的卡全都出现过 → 它一个首发也没有，
+        // 这正是复刻池的形状（实测 260 个复刻池的首发卡都是 0 张）
+        gachaSample(id = 4, startAt = 4_000, cards = listOf(2, 3, 4)),
+    )
+    val debutMap = debutCardIdsByGacha(debutPools)
+    checkEq("首发：池 1 独得 1、2", debutMap[1].orEmpty(), setOf(1, 2))
+    checkEq("首发：池 2 只有 3 是新卡", debutMap[2].orEmpty(), setOf(3))
+    checkEq("首发：池 3 只有 4 是新卡（1、3 都是老的）", debutMap[3].orEmpty(), setOf(4))
+    checkEq("首发：全是老卡的池子没有首发（复刻池就是这种情况）", debutMap[4], null)
+    checkEq("首发卡合计", debutMap.values.flatten().size, 4)
+
+    // ── 池内重点卡与其余卡 ──
+    val releaseAtById = mapOf(1 to 300L, 2 to 200L, 3 to 100L, 4 to 400L)
+    val releaseOf = { id: Int -> releaseAtById[id] ?: Long.MIN_VALUE }
+    checkEq(
+        "重点卡：UP 在前且保持官方顺序，然后是首发卡（按发售时间倒序）",
+        gachaFocusCardIds(
+            pool = listOf(1, 2, 3, 4),
+            upCardIds = listOf(3, 1),
+            debutCardIds = setOf(2, 4),
+            releaseAtOf = releaseOf,
+        ),
+        listOf(3, 1, 4, 2),
+    )
+    checkEq(
+        "UP 不在池内时被剔掉（实测 1004 个池里有 1 条脏数据）",
+        gachaFocusCardIds(
+            pool = listOf(1, 2),
+            upCardIds = listOf(9),
+            debutCardIds = emptySet(),
+            releaseAtOf = releaseOf,
+        ),
+        emptyList(),
+    )
+    checkEq(
+        "复刻池：首发为空，重点只剩 UP（实测 260 个复刻池的首发卡都是 0 张）",
+        gachaFocusCardIds(
+            pool = listOf(1, 2, 3),
+            upCardIds = listOf(3),
+            debutCardIds = emptySet(),
+            releaseAtOf = releaseOf,
+        ),
+        listOf(3),
+    )
+    checkEq(
+        "其余卡不再按 id 升序，而是按发售时间倒序（实测 1002 / 1004 个池原本就是 id 升序）",
+        gachaRestCardIds(
+            pool = listOf(3, 1, 2),
+            focusCardIds = emptyList(),
+            releaseAtOf = releaseOf,
+        ),
+        listOf(1, 2, 3),
+    )
+    checkEq(
+        "发售时间未知的卡排在最后（卡表里还没这张卡时不会插到最前）",
+        gachaRestCardIds(
+            pool = listOf(1, 77),
+            focusCardIds = emptyList(),
+            releaseAtOf = releaseOf,
+        ),
+        listOf(1, 77),
+    )
+    val partitionPool = listOf(3, 1, 2, 4)
+    val partitionFocus = gachaFocusCardIds(
+        pool = partitionPool,
+        upCardIds = listOf(4),
+        debutCardIds = setOf(2),
+        releaseAtOf = releaseOf,
+    )
+    checkEq(
+        "重点 + 其余 = 池内全部（折叠不丢卡，一张都不许少）",
+        (partitionFocus + gachaRestCardIds(partitionPool, partitionFocus, releaseOf)).sorted(),
+        partitionPool.sorted(),
     )
 
     // ─────────────────────────────────────────────────────────
@@ -2238,6 +2493,42 @@ fun main(args: Array<String>) {
                 "★ 清单记录的 sha 与源数据算出来的完全一致（$checked 张表）",
                 mismatched.isEmpty(),
                 mismatched.take(3).joinToString("；"),
+            )
+
+            // ── 行格式版本（DatapackSchema）──
+            // 这一段防的是「改了行格式、老用户却装不上新数据」：
+            // 内置快照的规则是「表里已经有数据就跳过」，所以格式一变必须显式登记，
+            // 否则库里的旧行会一直留着，而界面需要的新字段永远是空的
+            // （这一轮的 gachas.pk 就是这种情况）。
+            val schemaVersion = (manifest["schema"] as? JsonObject)?.intValue("version")
+            check(
+                "★ 快照清单声明了行格式版本",
+                schemaVersion != null,
+                "manifest 里没有 schema.version —— 老版本打包器生成的快照？",
+            )
+            check(
+                "★ 清单里的行格式版本与代码里的一致（${DatapackSchema.VERSION}）",
+                schemaVersion == DatapackSchema.VERSION,
+                "清单=$schemaVersion 代码=${DatapackSchema.VERSION}（改了裁剪器就要重新打快照）",
+            )
+            val declared = (manifest["schema"] as? JsonObject)?.get("changedTables")
+                ?.jsonArray.orEmpty().mapNotNull { (it as? JsonPrimitive)?.content }.toSet()
+            check(
+                "★ 清单声明要重导的表 = 代码里登记的表",
+                declared == DatapackSchema.tablesToReimport(0),
+                "清单=${declared.sorted()} 代码=${DatapackSchema.tablesToReimport(0).sorted()}",
+            )
+            check(
+                "行格式没前进时不会重导任何表（判据只在版本变大时成立）",
+                DatapackSchema.tablesToReimport(DatapackSchema.VERSION, DatapackSchema.VERSION).isEmpty(),
+            )
+            check(
+                "从最初的行格式（1）升级会重导 gachas.json（pk 字段是这一版才有的）",
+                DatapackSchema.tablesToReimport(1).contains("gachas.json"),
+            )
+            check(
+                "重导名单里的表都在快照清单里（认错表名会变成永远导不进）",
+                DatapackSchema.tablesToReimport(0).all { it in tables.mapNotNull { row -> row.stringValue("file") } },
             )
         }
     }

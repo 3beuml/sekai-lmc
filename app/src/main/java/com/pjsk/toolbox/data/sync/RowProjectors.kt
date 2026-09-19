@@ -107,6 +107,11 @@ object RowProjectors {
      *
      * 保留 `gachaDetails` 的 **`cardId`**（丢掉 `weight`）—— 这是「卡池 → 卡牌」的唯一映射，
      * 卡池详情页要靠它列出这个池子里的卡、并让用户点进卡牌详情。
+     *
+     * 另外保留 `gachaPickups` 的 `cardId` 成 `pk` —— 这是**官方口径的「UP 卡」**
+     * （池子门面那几张），卡池详情页靠它把重点卡排在最前、并打 UP 标。
+     * 实测 1004 个池全都有 pickups（共 3691 条），且**永远是 `gc` 的真子集**，
+     * 所以「UP」不需要任何猜测。代价约 25 KB。
      */
     val GACHAS = RowProjector { obj -> projectGacha(obj) }
 
@@ -127,6 +132,14 @@ object RowProjectors {
             put("gc", buildJsonArray {
                 val seen = HashSet<Int>()
                 (obj["gachaDetails"] as? JsonArray).orEmpty().forEach { element ->
+                    val cardId = (element as? JsonObject)?.intOrNull("cardId") ?: return@forEach
+                    if (seen.add(cardId)) add(cardId)
+                }
+            })
+            // 这个池子的 UP 卡（有序、去重）。见上面 GACHAS 的说明。
+            put("pk", buildJsonArray {
+                val seen = HashSet<Int>()
+                (obj["gachaPickups"] as? JsonArray).orEmpty().forEach { element ->
                     val cardId = (element as? JsonObject)?.intOrNull("cardId") ?: return@forEach
                     if (seen.add(cardId)) add(cardId)
                 }

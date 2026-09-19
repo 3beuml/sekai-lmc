@@ -181,7 +181,7 @@ enum class CardSort(val label: String) {
 /**
  * 列表页的筛选条件。
  *
- * **四个维度都是多选**（对齐 sekai.best / pjsk.moe 的筛选逻辑）：
+ * **五个维度都是多选**（对齐 sekai.best / pjsk.moe 的筛选逻辑）：
  *  - **同一维度内取「或」**：选了 HAPPY + CUTE，两种属性的卡都留下；
  *  - **跨维度取「且」**：属性选了 HAPPY、组合选了 Vivid BAD SQUAD，就要同时满足。
  *
@@ -195,6 +195,8 @@ data class CardQuery(
     val attrs: Set<CardAttr> = emptySet(),
     val characterIds: Set<Int> = emptySet(),
     val units: Set<CardUnit> = emptySet(),
+    /** 卡池类型（常驻 / 生日 / 期间限定 / 联动限定…），口径见 [CardSupplyType]。 */
+    val supplyTypes: Set<CardSupplyType> = emptySet(),
     val sort: CardSort = CardSort.RELEASE_DESC,
 ) {
     /** 已启用的筛选**维度个数**（不是选中项个数），用于顶部「筛选」按钮上的角标。 */
@@ -202,7 +204,8 @@ data class CardQuery(
         get() = (if (rarityKeys.isNotEmpty()) 1 else 0) +
             (if (attrs.isNotEmpty()) 1 else 0) +
             (if (characterIds.isNotEmpty()) 1 else 0) +
-            (if (units.isNotEmpty()) 1 else 0)
+            (if (units.isNotEmpty()) 1 else 0) +
+            (if (supplyTypes.isNotEmpty()) 1 else 0)
 
     val isFiltering: Boolean
         get() = search.isNotBlank() || activeCount > 0
@@ -214,7 +217,7 @@ data class CardQuery(
  * 改动字段时**必须同步改这个数**：它是编解码的结构契约，
  * 旧数据对不上就会被 [cardQueryFromSaveText] 整条丢掉并退回默认值（而不是崩）。
  */
-private const val CARD_QUERY_FIELDS = 6
+private const val CARD_QUERY_FIELDS = 7
 
 /**
  * 把筛选条件存成一行文本 / 从一行文本还原。
@@ -233,6 +236,7 @@ fun CardQuery.toSaveText(): String = encodeQueryFields(
     encodeQueryItems(attrs.map { it.name }),
     encodeQueryItems(characterIds.map { it.toString() }),
     encodeQueryItems(units.map { it.name }),
+    encodeQueryItems(supplyTypes.map { it.name }),
     sort.name,
     search,
 )
@@ -249,8 +253,11 @@ fun cardQueryFromSaveText(raw: String): CardQuery {
         units = decodeQueryItems(f[3]).mapNotNullTo(LinkedHashSet()) { name ->
             CardUnit.entries.firstOrNull { it.name == name }
         },
-        sort = CardSort.entries.firstOrNull { it.name == f[4] } ?: CardSort.RELEASE_DESC,
-        search = f[5],
+        supplyTypes = decodeQueryItems(f[4]).mapNotNullTo(LinkedHashSet()) { name ->
+            CardSupplyType.entries.firstOrNull { it.name == name }
+        },
+        sort = CardSort.entries.firstOrNull { it.name == f[5] } ?: CardSort.RELEASE_DESC,
+        search = f[6],
     )
 }
 
@@ -326,6 +333,12 @@ fun filterCards(
             // 注意：这里用 belongsToUnit 而不是 `it.key == unitKey` —— 后者的写法
             // 会把「借调」到各团的虚拟歌手卡漏掉（见 belongsToUnit 的说明）
             if (query.units.none { card.belongsToUnit(it, unitKey) }) return@filter false
+        }
+        if (query.supplyTypes.isNotEmpty()) {
+            // 查不到 cardSupplyId 的卡一律不留下：宁可它只出现在「不筛选」的结果里，
+            // 也不要把它当成常驻塞进「常驻」这一项里（那是编造数据）。
+            val supply = card.supplyType ?: return@filter false
+            if (supply !in query.supplyTypes) return@filter false
         }
         if (keyword.isNotEmpty()) {
             val hit = card.nameZh?.contains(keyword, ignoreCase = true) == true ||

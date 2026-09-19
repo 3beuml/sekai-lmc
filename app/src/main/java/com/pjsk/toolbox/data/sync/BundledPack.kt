@@ -41,6 +41,16 @@ class BundledPack(
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
+    /**
+     * 记「上一次装进去的快照行格式版本」（[DatapackSchema.VERSION]）。
+     *
+     * 用 SharedPreferences 而不是数据库：这只是一个整数，为它动 Room 表结构不值得
+     * （同样的取舍见 AppSettings / SyncManager）。
+     */
+    private val prefs = context.getSharedPreferences("datapack", Context.MODE_PRIVATE)
+
+    private fun installedSchemaVersion(): Int = prefs.getInt(KEY_SCHEMA_VERSION, 1)
+
     /** APK 里到底有没有打包数据（没有的话就退回纯在线同步）。 */
     val isBundled: Boolean
         get() = runCatching { context.assets.open(MANIFEST).close() }.isSuccess
@@ -57,10 +67,19 @@ class BundledPack(
      *
      * 配合 [install] 里「已有数据的表跳过」，这样既不会覆盖用户在线同步到的更新数据，
      * 又能自己把缺的表补上。
+     *
+     * 另外还有第二个判据：**行格式版本前进了**（[DatapackSchema]）——
+     * 「缺表就补」管不了「表在、但字段是旧的」，那正是老用户升级时
+     * 「界面上的新字段永远是空的」那类问题。
      */
     suspend fun needsInstall(): Boolean = withContext(Dispatchers.IO) {
         runCatching {
             val manifest = readManifest() ?: return@runCatching false
+            if (DatapackSchema.tablesToReimport(installedSchemaVersion(), manifest.schemaVersion)
+                    .isNotEmpty()
+            ) {
+                return@runCatching true
+            }
             manifest.entries.any { entry ->
                 val file = entry.file ?: return@any false
                 // ⚠️ **数实际行数，不要信 `sync_state.rowCount`。**
@@ -89,6 +108,19 @@ class BundledPack(
         val now = System.currentTimeMillis()
         val started = System.nanoTime()
 
+        // 行格式前进时**必须重导**的那几张表（见 DatapackSchema）：
+        // 表里已经有行也要重新装一遍，否则界面要用的新字段永远是空的。
+        val reimport = DatapackSchema.tablesToReimport(installedSchemaVersion(), manifest.schemaVersion)
+        val failedReimport = mutableSetOf<String>()
+        // 这一行**每次都打**：它是「老用户升级后到底有没有重导」的唯一现场证据。
+        // 只在真的重导时打日志的话，事后看到「导入完成 66 张表、用时 369ms」
+        // 根本判断不出是"本来就是最新的"还是"该重导却没重导"。
+        Log.i(
+            TAG,
+            "行格式版本：已装 ${installedSchemaVersion()} / 快照 ${manifest.schemaVersion}" +
+                if (reimport.isEmpty()) "，无需重导" else "，需重导：${reimport.joinToString("、")}",
+        )
+
         // 快照里每张表都带着**上游仓库的 blob sha**（打包时从 git trees API 取的）。
         // 导入时把它种成本地的"当前内容 sha"，于是：
         //  ① 首次在线同步只要取一次仓库树，就能判定「有没有更新」——全一致就一个字节都不下；
@@ -99,7 +131,8 @@ class BundledPack(
 
             // **表里已经有数据就跳过**：内置快照可能比用户在线同步过的数据旧，不能覆盖。
             // 判据同样是**数实际行数**（见 needsInstall 的说明：同步记录里的 rowCount 不可信）。
-            if (db.masterDao().count(fileName) > 0) {
+            // 唯一例外是 reimport 名单里的表（行格式变了，旧行缺字段）。
+            if (fileName !in reimport && db.masterDao().count(fileName) > 0) {
                 // 已经有数据的表也要补 sha（否则它永远拿不到"零请求"的优惠）
                 entry.sha?.let { repository.seedContentSha(ServerRegion.DEFAULT, fileName, it) }
                 return@forEachIndexed
@@ -117,6 +150,9 @@ class BundledPack(
             // 单张表失败不该让整个首次启动废掉：记下来继续导下一张
             if (opened.isFailure) {
                 failures += "$fileName: ${opened.exceptionOrNull()?.message}"
+                // 重导失败时**不记格式版本**，下次启动再试一次 ——
+                // 否则「升级时装失败」就变成了「这个字段永远没有」（和原本的陷阱一模一样）
+                if (fileName in reimport) failedReimport += fileName
                 return@forEachIndexed
             }
 
@@ -171,6 +207,19 @@ class BundledPack(
                 ),
             )
         }
+
+        // 记下「这份行格式已经装好了」。有重导失败的表就不记：
+        // 下次启动会再试一次（宁可多导一遍，也不能让字段永远缺着）。
+        if (failedReimport.isEmpty() && manifest.schemaVersion > installedSchemaVersion()) {
+            prefs.edit().putInt(KEY_SCHEMA_VERSION, manifest.schemaVersion).apply()
+            Log.i(
+                TAG,
+                "行格式版本升到 ${manifest.schemaVersion}，已重导 ${reimport.size} 张表：" +
+                    reimport.joinToString("、"),
+            )
+        } else if (failedReimport.isNotEmpty()) {
+            Log.w(TAG, "行格式重导失败，下次启动重试：${failedReimport.joinToString("、")}")
+        }
         entries.size
     }
 
@@ -208,7 +257,10 @@ class BundledPack(
                 hasOverlay = obj.str("hasOverlay") == "true",
             )
         }
-        PackManifest(snapshot = snapshot, entries = entries)
+        // 行格式版本。清单里没有这一段（旧快照、或手工改过）时按 1 算 ——
+        // 也就是「最初的行格式」，这样升级上来的手机会走一次重导，不会漏。
+        val schemaVersion = ((root["schema"] as? JsonObject)?.str("version"))?.toIntOrNull() ?: 1
+        PackManifest(snapshot = snapshot, entries = entries, schemaVersion = schemaVersion)
     }.getOrNull()
 
     /**
@@ -229,7 +281,12 @@ class BundledPack(
     private fun JsonObject.str(key: String): String? =
         (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.content
 
-    private data class PackManifest(val snapshot: PackSnapshot?, val entries: List<PackEntry>)
+    private data class PackManifest(
+        val snapshot: PackSnapshot?,
+        val entries: List<PackEntry>,
+        /** 快照的行格式版本（见 [DatapackSchema]）；旧快照里没有这一段，按 1 算。 */
+        val schemaVersion: Int,
+    )
 
     private data class PackSnapshot(
         val generatedAt: String?,
@@ -252,6 +309,9 @@ class BundledPack(
         const val TAG = "BundledPack"
         const val DIR = "datapack"
         const val MANIFEST = "$DIR/manifest.json"
+
+        /** 「已经装好的行格式版本」存在这个 prefs 里（见 [DatapackSchema]）。 */
+        const val KEY_SCHEMA_VERSION = "installed_schema_version"
 
         /** 单张表超过这个耗时就打一行日志，方便日后定位「首次打开慢」到底慢在哪张表。 */
         const val SLOW_TABLE_LOG_MS = 400L

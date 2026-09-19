@@ -1,5 +1,6 @@
 import com.pjsk.toolbox.data.remote.TableCatalog
 import com.pjsk.toolbox.data.sync.ContentSha
+import com.pjsk.toolbox.data.sync.DatapackSchema
 import com.pjsk.toolbox.data.sync.JsonArrayStreamer
 import com.pjsk.toolbox.data.sync.RowProjectors
 import com.pjsk.toolbox.data.sync.TableSchemas
@@ -220,6 +221,21 @@ fun main(args: Array<String>) {
                 versionCommit?.get("masterVersion")?.let { put("masterVersion", it) }
                 versionCommit?.get("assetVersion")?.let { put("assetVersion", it) }
                 versionCommit?.get("at")?.let { put("versionCommitAt", it) }
+            },
+        )
+        // 行格式版本：App 靠它判断「表里虽然有数据、但字段是旧的」要重导一遍
+        // （见 DatapackSchema）。这里**直接取代码里的常量**，不手写数字 ——
+        // 两边写两份必然会有一天对不上，而那种错又不报错。
+        put(
+            "schema",
+            buildJsonObject {
+                put("version", DatapackSchema.VERSION)
+                put(
+                    "changedTables",
+                    buildJsonArray {
+                        DatapackSchema.tablesToReimport(0).sorted().forEach { add(it) }
+                    },
+                )
             },
         )
         put("tables", buildJsonArray { tableEntries.forEach { add(it) } })

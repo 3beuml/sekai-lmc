@@ -78,6 +78,15 @@ data class HomeGacha(
     /** `gachas.gachaType`：ceil / normal / gift / beginner。卡池列表用它做分类筛选。 */
     val gachaType: String,
     val cardIds: List<Int>,
+    /**
+     * 这个池子的 **UP 卡**（`gachas.pk`，官方 `gachaPickups` 的 `cardId`，保持原顺序）。
+     *
+     * 卡池详情页靠它把重点卡排在最前、并打「UP」标。旧数据里没有这个字段时为空 ——
+     * 那就退化成「没有 UP」，不会崩。
+     */
+    val upCardIds: List<Int> = emptyList(),
+    /** 第一次能在这个池子抽到的卡（全员池子按开始时间算出来的，见 [debutCardIdsByGacha]）。 */
+    val debutCardIds: Set<Int> = emptySet(),
 )
 
 /** 首页「即将到来的生日」用一个角色。 */
@@ -195,10 +204,10 @@ class HomeRepository(private val dao: MasterDao) {
         }
         .flowOn(Dispatchers.Default)
 
-    /** 卡池：按 `startAt` 倒序（新→旧）。1001 个。 */
+    /** 卡池：按 `startAt` 倒序（新→旧）。1004 个。 */
     val gachas: Flow<List<HomeGacha>> = dao.observeAll(TABLE_GACHAS)
         .map { rows ->
-            rows.mapNotNull { row ->
+            val parsed = rows.mapNotNull { row ->
                 val obj = row.jsonObject() ?: return@mapNotNull null
                 val bundle = obj.str("bundle") ?: return@mapNotNull null
                 HomeGacha(
@@ -209,7 +218,14 @@ class HomeRepository(private val dao: MasterDao) {
                     endAt = obj.longOrNull("endAt") ?: row.sortValue,
                     gachaType = obj.str("gachaType").orEmpty(),
                     cardIds = obj.intList("gc"),
+                    upCardIds = obj.intList("pk"),
                 )
+            }
+            // 首发卡要**跨池子**算（按开始时间升序走一遍），所以放在这里一次性补上，
+            // 而不是留给界面去算 —— 界面里那次会随每次重组重跑，1004 个池 × 上百张卡不便宜。
+            val debut = debutCardIdsByGacha(parsed)
+            parsed.map { gacha ->
+                gacha.copy(debutCardIds = debut[gacha.id].orEmpty())
             }.sortedByDescending { it.startAt }
         }
         .flowOn(Dispatchers.Default)

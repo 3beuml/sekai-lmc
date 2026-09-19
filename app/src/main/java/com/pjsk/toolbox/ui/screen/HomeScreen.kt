@@ -325,8 +325,8 @@ fun HomeScreen(
                         ),
                         LinkSpec(
                             title = "贴纸制作器",
-                            note = "第三方网站 st.ayaka.one",
-                            url = "https://st.ayaka.one/",
+                            note = "第三方网站 pjsk.moe，表情包制作",
+                            url = "https://pjsk.moe/zh-cn/sticker-maker/",
                         ),
                     )
                     LinkRow(

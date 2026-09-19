@@ -91,6 +91,7 @@ import com.pjsk.toolbox.data.card.fullStats
 import com.pjsk.toolbox.data.card.masterRankBonusOf
 import com.pjsk.toolbox.data.card.secondaryNameFor
 import com.pjsk.toolbox.data.card.sumEpisodeBonus
+import com.pjsk.toolbox.data.card.supplyType
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.ui.common.AttrIcon
@@ -98,6 +99,8 @@ import com.pjsk.toolbox.ui.common.EmptyState
 import com.pjsk.toolbox.ui.common.KeyValueRow
 import com.pjsk.toolbox.ui.common.RowDivider
 import com.pjsk.toolbox.ui.common.SectionTitle
+import com.pjsk.toolbox.ui.common.TagChip
+import com.pjsk.toolbox.ui.common.TagTone
 import com.pjsk.toolbox.util.AssetDownloader
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
@@ -506,6 +509,23 @@ fun CardDetailScreen(
                 }
                 KeyValueRow("角色", character?.displayNameFor(nameLanguage) ?: "（需同步「角色」模块）")
                 character?.unitLabel?.let { KeyValueRow("组合", it) }
+                // 卡池类型（口径来自官方 cardSupplies，不是猜的）：
+                // 列表上的角标只写「限定」两个字，这里把完整类型写清楚 ——
+                // 「期间限定 / 联动限定 / CF 限定」的差别只有在这一屏才看得全。
+                KeyValueRow("卡池") {
+                    val supply = current.supplyType
+                    if (supply == null) {
+                        Text("—", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (supply.limited) {
+                                TagChip(text = "限定", tone = TagTone.ACCENT)
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(supply.label, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
                 KeyValueRow("技能名", current.skillName ?: "—")
                 KeyValueRow(
                     "开放时间",
