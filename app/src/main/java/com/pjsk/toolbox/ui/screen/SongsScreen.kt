@@ -1,6 +1,7 @@
 package com.pjsk.toolbox.ui.screen
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -88,6 +90,7 @@ import com.pjsk.toolbox.data.player.toTrack
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.settings.NameLanguage
+import com.pjsk.toolbox.data.settings.VocalMode
 import com.pjsk.toolbox.ui.common.EmptyState
 import com.pjsk.toolbox.ui.common.RemoteImage
 import com.pjsk.toolbox.ui.common.RowDivider
@@ -135,6 +138,8 @@ fun SongsScreen(
     val nameLanguage by container.appSettings.nameLanguage.collectAsState()
     // 收藏：musicId -> 收藏时间（收藏页要按"最近收藏在前"排序）
     val favorites by container.appSettings.favoriteSongs.collectAsState()
+    // 默认演唱版本的全局态（顶栏二态切换按钮）：原曲版 ↔ 世界版
+    val vocalMode by container.appSettings.vocalMode.collectAsState()
     val player = container.musicPlayer
     // 列表行要知道"现在播的是哪首"才能把 ▶ 换成 ⏸
     val playback by player.state.collectAsState()
@@ -229,6 +234,51 @@ fun SongsScreen(
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             },
+                        )
+                    }
+                    // 默认演唱版本二态切换：原曲版 ↔ 世界版。
+                    // 世界版态：主色填充背景 + 白图标白字（表示"已切换"）
+                    // 原曲版态：描边 + 灰图标灰字（默认）。点了在两态间切。
+                    val isSekai = vocalMode == VocalMode.SEKAI
+                    val switchTint = if (isSekai) {
+                        MaterialTheme.colorScheme.onPrimary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (isSekai) MaterialTheme.colorScheme.primary else Color.Transparent,
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (isSekai) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.outlineVariant
+                                },
+                                shape = RoundedCornerShape(16.dp),
+                            )
+                            .clickable {
+                                container.appSettings.setVocalMode(
+                                    if (isSekai) VocalMode.ORIGINAL else VocalMode.SEKAI,
+                                )
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SwapHoriz,
+                            contentDescription = null,
+                            tint = switchTint,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = vocalMode.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = switchTint,
                         )
                     }
                 },

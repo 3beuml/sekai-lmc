@@ -1,13 +1,15 @@
 package com.pjsk.toolbox.data.home
 
 import com.pjsk.toolbox.data.db.MasterDao
-import com.pjsk.toolbox.data.music.buildDefaultVocals
+import com.pjsk.toolbox.data.music.pickPreferredVocal
+import com.pjsk.toolbox.data.settings.AppSettings
 import com.pjsk.toolbox.ui.common.intOrNull
 import com.pjsk.toolbox.ui.common.jsonObject
 import com.pjsk.toolbox.ui.common.longOrNull
 import com.pjsk.toolbox.ui.common.str
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
@@ -102,17 +104,40 @@ data class HomeBirthday(
  *
  * 三张表都**已经在内置快照里**（`musics` / `events` / `characterProfiles`），
  * 所以首页这些区块不需要新增任何数据，只是把已有数据组装出来。
+ *
+ * ⚠️ `musics` 现在依赖 [appSettings]（默认演唱版本的全局态 + 收藏歌的版本记忆），
+ * 它俩变了列表行的 ▶ 会跟着换版本。优先级见 [pickPreferredVocal]。
  */
-class HomeRepository(private val dao: MasterDao) {
+class HomeRepository(
+    private val dao: MasterDao,
+    private val appSettings: AppSettings,
+) {
+
+    /** 把 appSettings 里的三流合并成一个，避免 `musics` 的 combine 超过 5 个参数。 */
+    private data class VocalPrefs(
+        val mode: com.pjsk.toolbox.data.settings.VocalMode,
+        val preferredVocals: Map<Int, Int>,
+        val favoriteIds: Set<Int>,
+    )
+
+    private val vocalPrefs = combine(
+        appSettings.vocalMode,
+        appSettings.preferredVocals,
+        appSettings.favoriteSongs,
+    ) { mode, preferred, favorites ->
+        VocalPrefs(mode, preferred, favorites.keys)
+    }
 
     /** 最新歌曲：按 `publishedAt` 倒序。 */
-    val musics: Flow<List<HomeMusic>> = kotlinx.coroutines.flow.combine(
+    val musics: Flow<List<HomeMusic>> = combine(
         dao.observeAll(TABLE_MUSICS),
         dao.observeAll(TABLE_MUSIC_TAGS),
         dao.observeAll(TABLE_MUSIC_CATEGORIES),
         // 音源表：列表上的 ▶ 要"点了就响"，得先知道默认版本是哪个素材
         dao.observeAll(TABLE_MUSIC_VOCALS),
-    ) { rows, tagRows, categoryRows, vocalRows ->
+        // 默认演唱版本的全局态 + 收藏歌的版本记忆（变了列表 ▶ 跟着换版本）
+        vocalPrefs,
+    ) { rows, tagRows, categoryRows, vocalRows, prefs ->
         // musicId -> 组合标签（去掉无区分度的 all）
         val tagsByMusic = tagRows.groupBy { it.jsonObject()?.intOrNull("musicId") ?: 0 }
             .mapValues { (_, list) ->
@@ -123,21 +148,17 @@ class HomeRepository(private val dao: MasterDao) {
             .mapValues { (_, list) ->
                 list.mapNotNull { it.jsonObject()?.str("musicCategoryName")?.takeIf { c -> c.isNotBlank() } }
             }
-        // musicId -> 默认音源版本（seq 最小的那个）
-        val defaultVocalByMusic = vocalRows.groupBy { it.jsonObject()?.intOrNull("musicId") ?: 0 }
-            .mapValues { (_, list) ->
-                val first = list.minByOrNull { it.jsonObject()?.intOrNull("seq") ?: Int.MAX_VALUE }
-                val obj = first?.jsonObject()
-                val bundle = obj?.str("assetbundleName")?.takeIf { it.isNotBlank() }
-                if (first == null || bundle == null) {
-                    null
+        // musicId -> 实际要播的那个版本（按优先级挑：收藏歌记忆 > 全局态 > seq 最小）
+        val defaultVocalByMusic = vocalRows
+            .groupBy { it.jsonObject()?.intOrNull("musicId") ?: 0 }
+            .mapValues { (musicId, list) ->
+                // 只有收藏歌才查记忆；非收藏歌传 null（pickPreferredVocal 会走全局态/默认）
+                val preferredId = if (musicId in prefs.favoriteIds) {
+                    prefs.preferredVocals[musicId]
                 } else {
-                    HomeMusicVocal(
-                        id = first.id,
-                        assetbundleName = bundle,
-                        caption = obj.str("caption").orEmpty(),
-                    )
+                    null
                 }
+                pickPreferredVocal(list, prefs.mode, preferredId)
             }
         run {
             rows.mapNotNull { row ->

@@ -146,6 +146,8 @@ fun PlayerScreen(
     val state by player.state.collectAsState()
     val nameLanguage by container.appSettings.nameLanguage.collectAsState()
     val storedPlayMode by container.appSettings.playMode.collectAsState()
+    // 收藏列表：切版本时给收藏歌记版本（非收藏歌点版本只当场换、不记）
+    val favorites by container.appSettings.favoriteSongs.collectAsState()
 
     val track = state.track
     var showVersions by remember { mutableStateOf(false) }
@@ -201,9 +203,23 @@ fun PlayerScreen(
      *
      * 这个弹层列的就是**当前这首歌**的版本，所以正常永远走原地换；
      * 兜底分支（理论上走不到）才另起队列，而且**从头播**（沿用别的歌的位置是错的）。
+     *
+     * ## 收藏歌记版本（2026-10-04 加）
+     *
+     * 切到的这首歌如果在收藏里，就把这个版本记进 `appSettings.preferredVocals` ——
+     * 以后这首歌无论从哪播（列表 ▶、收藏列表、详情页另起队列）都用这个版本，
+     * 优先级高于顶栏全局态。非收藏歌点版本只当场换、不记。
+     *
+     * ⚠️ 记忆写在切换之前：这样无论 `playVersion` 走成（原地换）还是落进兜底
+     * （另起队列），记忆都写进去了。`trackOf` 返回 null（没素材名）会提前 return，
+     * 那种没音源的版本也不该记。
      */
     fun switchTo(target: MusicVocal) {
         val newTrack = trackOf(target) ?: return
+        // 收藏歌记版本：切了以后这首收藏歌各处播都用这个版本
+        if (track.musicId in favorites) {
+            container.appSettings.setPreferredVocal(track.musicId, target.id)
+        }
         if (player.playVersion(newTrack)) return
         val tracks = vocals.mapNotNull(::trackOf)
         val index = tracks.indexOfFirst { it.vocalId == target.id }

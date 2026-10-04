@@ -83,8 +83,11 @@ class AppContainer(private val context: Context) {
     /**
      * 首页各区块（最新歌曲 / 最新活动 / 生日）。三张表都已在快照里，
      * 所以它不需要新增数据，只是把已有数据组装成首页要的形状。
+     *
+     * 依赖 [appSettings]：歌曲列表的默认演唱版本由全局态 + 收藏歌记忆决定
+     * （见 `HomeRepository` 与 `pickPreferredVocal`）。
      */
-    val homeRepository: HomeRepository by lazy { HomeRepository(database.masterDao()) }
+    val homeRepository: HomeRepository by lazy { HomeRepository(database.masterDao(), appSettings) }
 
     /**
      * 歌曲详情（资料页）。

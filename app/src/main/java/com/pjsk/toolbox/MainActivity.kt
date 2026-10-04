@@ -1,7 +1,10 @@
 package com.pjsk.toolbox
 
 import android.Manifest
+import android.app.ActivityManager
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
@@ -13,6 +16,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
+import com.pjsk.toolbox.R
 import com.pjsk.toolbox.ui.AppNav
 import com.pjsk.toolbox.ui.theme.SekaiLmcTheme
 import com.pjsk.toolbox.ui.theme.WindowBackgroundDark
@@ -29,6 +33,23 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 强制「最近任务 / 小窗」用当前应用图标，覆盖系统缓存的最早版（0.1.0）旧图标。
+        // 用户之前装过 0.1.0，系统把那时的 task icon 缓存了；装机新版后桌面刷新、
+        // 最近任务却没刷新。setTaskDescription 主动告诉系统重拉一次 application icon。
+        // icon 用 adaptive 渲染成 bitmap（background + foreground 都画进去，完整图标）。
+        runCatching {
+            val size = 108
+            val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            ContextCompat.getDrawable(this, R.mipmap.ic_launcher)?.apply {
+                setBounds(0, 0, size, size)
+                draw(canvas)
+            }
+            @Suppress("DEPRECATION")
+            setTaskDescription(ActivityManager.TaskDescription(getString(R.string.app_name), bmp))
+        }
+
         val container = (application as PjskApp).container
         setContent {
             // 外观模式存在偏好里，改设置后整个界面立刻跟着切

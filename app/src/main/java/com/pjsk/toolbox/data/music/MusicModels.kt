@@ -7,6 +7,7 @@ import com.pjsk.toolbox.data.card.pickSecondary
 import com.pjsk.toolbox.data.db.MasterRowEntity
 import com.pjsk.toolbox.data.home.HomeMusicVocal
 import com.pjsk.toolbox.data.settings.NameLanguage
+import com.pjsk.toolbox.data.settings.VocalMode
 import com.pjsk.toolbox.ui.common.intOrNull
 import com.pjsk.toolbox.ui.common.jsonObject
 import com.pjsk.toolbox.ui.common.longOrNull
@@ -400,6 +401,68 @@ fun buildDefaultVocals(vocalRows: List<MasterRowEntity>): Map<Int, HomeMusicVoca
             )
         }
         .toMap()
+
+/**
+ * 从某首歌的 `musicVocals` 行里挑「实际要播的那个版本」。**纯函数**，logic-check 断言。
+ *
+ * 优先级（和 `HomeRepository` 组装 `HomeMusic.defaultVocal` 用的完全一致）：
+ *
+ * 1. [preferredVocalId] 非空且在这首歌的 vocal 行里按行主键找得到 → 用它。
+ *    （收藏歌曲在播放器「版本」弹层里记过的版本，**单曲定制**，优先级最高）
+ * 2. 否则 [mode] == [VocalMode.SEKAI] 且这首歌有 `musicVocalType == "sekai"` 的版本
+ *    → 用 `seq` 最小的那个 `sekai` 版（实测就是全员合唱的"セカイver."）。
+ * 3. 否则 → 用 `seq` 最小的那个（游戏默认版本，和加这个功能之前完全一致）。
+ *
+ * ⚠️ [preferredVocalId] 由调用方**只在「这首歌是收藏歌且记过版本」时**传入；
+ * 非收藏歌传 null，于是自动落到第 2/3 档走全局态。本函数不需要知道「收藏」概念。
+ *
+ * ⚠️ 第 1 档里「找得到」= 这首歌的 vocal 行里存在 `id == preferredVocalId` 的那一行。
+ * 上游数据更新后该 vocal 行可能被删/换，那时记的偏好会自动落空 → 回退到第 2/3 档，
+ * 不会崩、不会播错歌（编解码那层也是宽容的，详见 `PreferredVocalCodec`）。
+ *
+ * @param vocalRowsForMusic 已经按 `musicId` 过滤好的、属于这一首歌的全部 vocal 行
+ */
+fun pickPreferredVocal(
+    vocalRowsForMusic: List<MasterRowEntity>,
+    mode: VocalMode,
+    preferredVocalId: Int?,
+): HomeMusicVocal? {
+    if (vocalRowsForMusic.isEmpty()) return null
+
+    // 1. 收藏歌记忆：按行主键精确匹配（不能按 vocalType，14% 的歌同 type 有多行）
+    if (preferredVocalId != null) {
+        vocalRowsForMusic.firstOrNull { it.id == preferredVocalId }
+            ?.toHomeMusicVocal()
+            ?.let { return it }
+        // 找不到（记忆失效）→ 继续走下面两档，不报错
+    }
+
+    // 2. 世界版态：seq 最小的 sekai 版
+    if (mode == VocalMode.SEKAI) {
+        vocalRowsForMusic
+            .filter { it.jsonObject()?.str("musicVocalType") == "sekai" }
+            .minByOrNull { it.jsonObject()?.intOrNull("seq") ?: Int.MAX_VALUE }
+            ?.toHomeMusicVocal()
+            ?.let { return it }
+        // 这首歌没有 sekai 版 → 落到第 3 档播默认（"没有就不切换"）
+    }
+
+    // 3. 游戏默认：seq 最小
+    return vocalRowsForMusic
+        .minByOrNull { it.jsonObject()?.intOrNull("seq") ?: Int.MAX_VALUE }
+        ?.toHomeMusicVocal()
+}
+
+/** 把一行 `musicVocals` 转成列表行要用的精简结构。缺素材名返回 null。 */
+private fun MasterRowEntity.toHomeMusicVocal(): HomeMusicVocal? {
+    val obj = jsonObject() ?: return null
+    val bundle = obj.str("assetbundleName")?.takeIf { it.isNotBlank() } ?: return null
+    return HomeMusicVocal(
+        id = id,
+        assetbundleName = bundle,
+        caption = obj.str("caption").orEmpty(),
+    )
+}
 
 /** `limitedTimeMusics.json`：期间限定的曲目。 */
 fun parseLimitedTimeMusic(row: MasterRowEntity): Int? =

@@ -3,7 +3,9 @@ package com.pjsk.toolbox.data.settings
 import android.content.Context
 import com.pjsk.toolbox.data.player.PlayMode
 import com.pjsk.toolbox.util.decodeFavoriteSongs
+import com.pjsk.toolbox.util.decodePreferredVocals
 import com.pjsk.toolbox.util.encodeFavoriteSongs
+import com.pjsk.toolbox.util.encodePreferredVocals
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,6 +28,25 @@ enum class NameLanguage(val label: String, val description: String) {
     CHINESE_FIRST("中文优先", "有中文就显示中文，没有则显示日文原名"),
     JAPANESE("日文原名", "始终显示日文原名，中文放在副标题"),
     BILINGUAL("双语对照", "中文为主、日文作为副标题一起给出"),
+}
+
+/**
+ * 歌曲默认演唱版本的全局偏好（歌曲板块顶栏那个二态切换按钮）。
+ *
+ * - [ORIGINAL] = 「原曲版」：所有歌播各自默认版本（`musicVocals` 里 `seq` 最小的那个），
+ *   即游戏内默认那个，和没加这个功能之前完全一致。
+ * - [SEKAI] = 「世界版」：每首歌有 `sekai` 版就播 `seq` 最小的 `sekai` 版（实测就是
+ *   全员合唱的"セカイver."），没有 `sekai` 版就回退默认（"没有就不切换"）。
+ *
+ * 只影响"没有单曲定制"的歌：收藏歌在播放器里单独记过的版本（[preferredVocals]）
+ * 优先级高于这个全局态。详见 `HomeRepository` 组装 `defaultVocal` 的逻辑。
+ *
+ * 用名字存而不是序号：和 [ThemeMode] / [PlayMode] 同款，枚举中间插项不会让用户设置错位。
+ */
+enum class VocalMode(val label: String) {
+    ORIGINAL("原曲版"),
+    SEKAI("世界版"),
+    ;
 }
 
 /**
@@ -63,6 +84,22 @@ class AppSettings(context: Context) {
     fun setPlayMode(mode: PlayMode) {
         prefs.edit().putString(KEY_PLAY_MODE, mode.name).apply()
         _playMode.value = mode
+    }
+
+    /**
+     * 歌曲默认演唱版本的全局态（顶栏二态切换）。
+     *
+     * 默认 [VocalMode.ORIGINAL]（原曲版）= 行为和加这个功能之前完全一致，
+     * 老用户升上来不会察觉任何变化。
+     */
+    private val _vocalMode = MutableStateFlow(
+        enumOrDefault(prefs.getString(KEY_VOCAL_MODE, null), VocalMode.ORIGINAL),
+    )
+    val vocalMode: StateFlow<VocalMode> = _vocalMode.asStateFlow()
+
+    fun setVocalMode(mode: VocalMode) {
+        prefs.edit().putString(KEY_VOCAL_MODE, mode.name).apply()
+        _vocalMode.value = mode
     }
 
     fun setThemeMode(mode: ThemeMode) {
@@ -106,6 +143,39 @@ class AppSettings(context: Context) {
     private fun readFavorites(): Map<Int, Long> =
         decodeFavoriteSongs(prefs.getStringSet(KEY_FAVORITE_SONGS, emptySet()).orEmpty())
 
+    // ─────────────────────────────────────────────────────────────
+    // 收藏歌曲的版本偏好
+    //
+    // 只给**收藏歌曲**记一份"以后播这首就用这个版本"，在全屏播放器的「版本」弹层里
+    // 切换版本时写入（[com.pjsk.toolbox.ui.player.PlayerScreen] 的 switchTo）。
+    // 非收藏歌点版本只当场换、不写进来。
+    //
+    // 和收藏同款：SharedPreferences StringSet + 纯函数编解码（[encodePreferredVocals]），
+    // 不进数据库。优先级高于 [vocalMode]（全局态），详见 `HomeRepository` 的组装逻辑。
+    // ─────────────────────────────────────────────────────────────
+
+    private val _preferredVocals = MutableStateFlow(readPreferredVocals())
+    val preferredVocals: StateFlow<Map<Int, Int>> = _preferredVocals.asStateFlow()
+
+    /**
+     * 给某首**收藏歌曲**记一个版本。切版本时调；写完之后这首歌以后各处播都用这个版本。
+     */
+    fun setPreferredVocal(musicId: Int, vocalId: Int) {
+        val next = _preferredVocals.value + (musicId to vocalId)
+        prefs.edit().putStringSet(KEY_PREFERRED_VOCALS, encodePreferredVocals(next)).apply()
+        _preferredVocals.value = next
+    }
+
+    /** 取消某首歌的版本记忆（回退到全局态/默认）。 */
+    fun clearPreferredVocal(musicId: Int) {
+        val next = _preferredVocals.value - musicId
+        prefs.edit().putStringSet(KEY_PREFERRED_VOCALS, encodePreferredVocals(next)).apply()
+        _preferredVocals.value = next
+    }
+
+    private fun readPreferredVocals(): Map<Int, Int> =
+        decodePreferredVocals(prefs.getStringSet(KEY_PREFERRED_VOCALS, emptySet()).orEmpty())
+
     /**
      * 把存下来的字符串还原成枚举。
      *
@@ -120,5 +190,7 @@ class AppSettings(context: Context) {
         const val KEY_NAME_LANGUAGE = "name_language"
         const val KEY_FAVORITE_SONGS = "favorite_songs"
         const val KEY_PLAY_MODE = "play_mode"
+        const val KEY_VOCAL_MODE = "vocal_mode"
+        const val KEY_PREFERRED_VOCALS = "preferred_vocals"
     }
 }

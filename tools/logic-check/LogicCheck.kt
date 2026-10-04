@@ -48,6 +48,7 @@ import com.pjsk.toolbox.data.music.positionOfFraction
 import com.pjsk.toolbox.data.music.playerPositionMs
 import com.pjsk.toolbox.data.music.buildCharacterSongIds
 import com.pjsk.toolbox.data.music.buildDefaultVocals
+import com.pjsk.toolbox.data.music.pickPreferredVocal
 import com.pjsk.toolbox.data.music.buildMusicDetail
 import com.pjsk.toolbox.data.music.buildSongCategoryCards
 import com.pjsk.toolbox.data.music.filterSongs
@@ -109,9 +110,12 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import com.pjsk.toolbox.util.decodeFavoriteSongs
+import com.pjsk.toolbox.util.decodePreferredVocals
 import com.pjsk.toolbox.util.encodeFavoriteSongs
+import com.pjsk.toolbox.util.encodePreferredVocals
 import com.pjsk.toolbox.util.moveMatchesFirst
 import com.pjsk.toolbox.util.parseHexColor
+import com.pjsk.toolbox.data.settings.VocalMode
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -1869,6 +1873,58 @@ fun main(args: Array<String>) {
         ).size,
         0,
     )
+
+    // ── 默认演唱版本切换（全局态 + 收藏歌记忆，2026-10-04 加）──
+    // 顶栏二态按钮（原曲版 ↔ 世界版）+ 收藏歌在播放器切版本时记 vocalId。
+    // 编解码照收藏那套范式；pickPreferredVocal 是 HomeRepository 组装 defaultVocal 用的纯函数。
+
+    // 编解码（宽容：vocalId 损坏当 0，musicId 解析不出才丢）
+    checkEq("版本偏好：往返一致", decodePreferredVocals(encodePreferredVocals(mapOf(644 to 1663, 585 to 5852))), mapOf(644 to 1663, 585 to 5852))
+    checkEq("版本偏好：空往返", decodePreferredVocals(encodePreferredVocals(emptyMap())), emptyMap<Int, Int>())
+    checkEq("版本偏好：vocalId 损坏当 0（不丢整条）", decodePreferredVocals(setOf("644:abc")), mapOf(644 to 0))
+    checkEq("版本偏好：musicId 解析不出才丢", decodePreferredVocals(setOf("abc:5")), emptyMap())
+
+    // 带 musicVocalType 的夹具（测全局态/收藏记忆要用类型）
+    fun vocalRowT(rowId: Int, musicId: Int, seq: Int, type: String, bundle: String, caption: String) = row(
+        "musicVocals.json", rowId, null, null,
+        buildJsonObject {
+            put("musicId", musicId)
+            put("seq", seq)
+            put("musicVocalType", type)
+            put("assetbundleName", bundle)
+            put("caption", caption)
+        },
+    )
+    // 644：虚拟歌手(seq101) + 世界(seq201)
+    val v644 = listOf(
+        vocalRowT(1201, 644, 101, "virtual_singer", "vs_0644_01", "バーチャル・シンガーver."),
+        vocalRowT(1663, 644, 201, "sekai", "se_0644_01", "セカイver."),
+    )
+    // 585：两个世界版（全员 6 人 seq202 + Leo/need 4 人 seq203）——多 sekai 取 seq 最小
+    val v585 = listOf(
+        vocalRowT(5851, 585, 202, "sekai", "sk_585_01", "セカイver."),
+        vocalRowT(5852, 585, 203, "sekai", "ln_585_01", "Leo/need ver."),
+    )
+    // 1：只有一个原曲版，没有世界版（SEKAI 态该回退默认）
+    val v1 = listOf(
+        vocalRowT(2, 1, 101, "original_song", "0001_01", "バーチャル・シンガーver."),
+    )
+
+    // ORIGINAL 态 = seq 最小（和 buildDefaultVocals 完全一致，老用户无感）
+    checkEq("ORIGINAL 态：seq 最小", pickPreferredVocal(v644, VocalMode.ORIGINAL, null)?.assetbundleName, "vs_0644_01")
+    // SEKAI 态 = seq 最小 sekai
+    checkEq("SEKAI 态：seq 最小 sekai", pickPreferredVocal(v644, VocalMode.SEKAI, null)?.assetbundleName, "se_0644_01")
+    // SEKAI 态 多个 sekai 取 seq 最小（全员版而非团版）
+    checkEq("SEKAI 态：多 sekai 取 seq 最小（全员版不是团版）", pickPreferredVocal(v585, VocalMode.SEKAI, null)?.assetbundleName, "sk_585_01")
+    // SEKAI 态 但这首歌没 sekai → 回退默认（"没有就不切换"）
+    checkEq("SEKAI 态：没 sekai 回退默认", pickPreferredVocal(v1, VocalMode.SEKAI, null)?.assetbundleName, "0001_01")
+    // 收藏歌记忆优先于全局态（ORIGINAL 态但记了 sekai 版）
+    checkEq("★ 记忆优先于全局态（ORIGINAL 态下记的 sekai 仍生效）", pickPreferredVocal(v644, VocalMode.ORIGINAL, 1663)?.assetbundleName, "se_0644_01")
+    // 记忆失效（vocalId 不存在）→ 回退全局态
+    checkEq("记忆失效回退全局态（ORIGINAL）", pickPreferredVocal(v644, VocalMode.ORIGINAL, 9999)?.assetbundleName, "vs_0644_01")
+    checkEq("记忆失效回退全局态（SEKAI）", pickPreferredVocal(v644, VocalMode.SEKAI, 9999)?.assetbundleName, "se_0644_01")
+    // 空列表不崩
+    checkEq("空列表不崩", pickPreferredVocal(emptyList(), VocalMode.SEKAI, 5), null)
 
     // ─────────────────────────────────────────────────────────
     section("19. 播放队列：从列表建队列、播放模式循环、列表行的播放键形态")
