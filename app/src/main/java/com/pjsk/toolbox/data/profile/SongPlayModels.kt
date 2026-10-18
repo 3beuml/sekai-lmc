@@ -28,6 +28,13 @@ data class SongPlayStatus(
     val played: Boolean,
     val fullCombo: Boolean,
     val allPerfect: Boolean,
+    /**
+     * 该难度的最高分。
+     *
+     * 加了它是因为**歌曲详情页要显示分数** —— 那里一次只看一首歌，
+     * 没必要为了一个数字再单独解析一遍快照。列表页不用它，也不受影响（默认 0）。
+     */
+    val highScore: Long = 0L,
 ) {
     companion object {
         val NONE = SongPlayStatus(played = false, fullCombo = false, allPerfect = false)
@@ -66,11 +73,49 @@ fun playStatusIndex(results: List<MusicResult>, difficulty: String): Map<Int, So
         if (r.difficulty.lowercase() != want) continue
         val old = out[r.musicId]
         out[r.musicId] = if (old == null) {
-            SongPlayStatus(played = true, fullCombo = r.fullCombo, allPerfect = r.allPerfect)
+            SongPlayStatus(
+                played = true,
+                fullCombo = r.fullCombo,
+                allPerfect = r.allPerfect,
+                highScore = r.highScore,
+            )
         } else {
             old.copy(
                 fullCombo = old.fullCombo || r.fullCombo,
                 allPerfect = old.allPerfect || r.allPerfect,
+                highScore = maxOf(old.highScore, r.highScore),
+            )
+        }
+    }
+    return out
+}
+
+/**
+ * 某一首歌在**各难度**上的成绩（`难度 key → 状态`）。歌曲详情页用它。
+ *
+ * 与 [playStatusIndex] 是同一套合并口径（重复行取最好：任一 FC 即 FC、分数取最高），
+ * 只是索引方向反过来。没有成绩的难度**不会**出现在结果里 —— 调用方按
+ * `map[key] ?: SongPlayStatus.NONE` 当"未打"处理即可，不要在这里补默认值
+ * （那会让"这首歌有没有成绩"这个判断失去依据）。
+ */
+fun songStatusByDifficulty(results: List<MusicResult>, musicId: Int): Map<String, SongPlayStatus> {
+    val out = HashMap<String, SongPlayStatus>(6)
+    for (r in results) {
+        if (r.musicId != musicId) continue
+        val key = r.difficulty.lowercase()
+        val old = out[key]
+        out[key] = if (old == null) {
+            SongPlayStatus(
+                played = true,
+                fullCombo = r.fullCombo,
+                allPerfect = r.allPerfect,
+                highScore = r.highScore,
+            )
+        } else {
+            old.copy(
+                fullCombo = old.fullCombo || r.fullCombo,
+                allPerfect = old.allPerfect || r.allPerfect,
+                highScore = maxOf(old.highScore, r.highScore),
             )
         }
     }

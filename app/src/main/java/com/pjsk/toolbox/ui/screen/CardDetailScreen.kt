@@ -92,11 +92,13 @@ import com.pjsk.toolbox.data.card.masterRankBonusOf
 import com.pjsk.toolbox.data.card.secondaryNameFor
 import com.pjsk.toolbox.data.card.sumEpisodeBonus
 import com.pjsk.toolbox.data.card.supplyType
+import com.pjsk.toolbox.data.profile.OwnedCard
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.ui.common.AttrIcon
 import com.pjsk.toolbox.ui.common.EmptyState
 import com.pjsk.toolbox.ui.common.KeyValueRow
+import com.pjsk.toolbox.ui.common.rememberPlayerSnapshot
 import com.pjsk.toolbox.ui.common.RowDivider
 import com.pjsk.toolbox.ui.common.SectionTitle
 import com.pjsk.toolbox.ui.common.TagChip
@@ -492,6 +494,19 @@ fun CardDetailScreen(
                 )
             }
 
+            // ── 我的这张卡（只有绑定了账号、且快照里有这张卡时才出现）──
+            // 用户明确要求：没登录就**什么都不要显示**，连"去绑定"的引导也不放。
+            rememberPlayerSnapshot()?.let { snap ->
+                snap.cards.firstOrNull { it.cardId == current.id }?.let { owned ->
+                    MyCardSection(
+                        owned = owned,
+                        canTrain = current.hasTrained,
+                        cap = caps[current.rarityKey] ?: FALLBACK_RARITY_CAPS[current.rarityKey],
+                        skillMaxLevel = skill?.maxLevel ?: 0,
+                    )
+                }
+            }
+
             // ── 基本信息 ──
             SectionTitle("基本信息")
             InfoCard {
@@ -650,6 +665,51 @@ fun CardDetailScreen(
 @Composable
 private fun InfoCard(content: @Composable () -> Unit) {
     Column(modifier = Modifier.fillMaxWidth()) { content() }
+}
+
+/**
+ * 「我的这张卡」：绑定账号后，把**玩家自己的那张**和内置资料并排看。
+ *
+ * 只显示快照里**真实有**的字段（等级 / 特训 / 突破 / 技能等级 / 已读剧情篇数）。
+ *
+ * ⚠️ **刻意不算综合力**：算综合力要知道"读了哪几篇剧情"（每篇加的属性不同），
+ * 而 `userCards.episodes` 我们只解析出**读了几篇**，不知道是哪几篇。
+ * 用"前 N 篇"去凑就是编数据 —— 这块留给批次 C（那时会有完整的加成链）。
+ */
+@Composable
+private fun MyCardSection(
+    owned: OwnedCard,
+    canTrain: Boolean,
+    cap: RarityCap?,
+    skillMaxLevel: Int,
+) {
+    SectionTitle("我的这张卡")
+    InfoCard {
+        // 等级上限跟着"有没有特训"走：特训后是 trainingMaxLevel（3★/4★ 才有）
+        val levelCap = when {
+            owned.trained -> cap?.trainingMaxLevel ?: cap?.maxLevel
+            else -> cap?.maxLevel
+        } ?: 0
+        KeyValueRow(
+            "等级",
+            if (levelCap > 0) "Lv.${owned.level} / $levelCap" else "Lv.${owned.level}",
+        )
+        KeyValueRow(
+            "特训",
+            when {
+                !canTrain -> "不可特训"
+                owned.trained -> "已特训"
+                else -> "未特训"
+            },
+        )
+        KeyValueRow("突破", "${owned.masterRank} / $MASTER_RANK_MAX")
+        KeyValueRow(
+            "技能",
+            if (skillMaxLevel > 0) "Lv.${owned.skillLevel} / $skillMaxLevel" else "Lv.${owned.skillLevel}",
+        )
+        // 剧情只报"读了几篇"：至于读的是哪一篇，快照里的字段我们没解析出可靠信息
+        KeyValueRow("剧情", "已读 ${owned.episodesRead} 篇")
+    }
 }
 
 /**

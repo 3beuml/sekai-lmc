@@ -148,6 +148,7 @@ import com.pjsk.toolbox.data.profile.difficultyCounts
 import com.pjsk.toolbox.data.profile.filterMySongs
 import com.pjsk.toolbox.data.profile.myMusicQueryFromSaveText
 import com.pjsk.toolbox.data.profile.statusCounts
+import com.pjsk.toolbox.data.profile.songStatusByDifficulty
 import com.pjsk.toolbox.data.profile.toSaveText
 import com.pjsk.toolbox.data.profile.MusicResult
 import com.pjsk.toolbox.data.profile.SongPlayFilter
@@ -3279,6 +3280,32 @@ fun main(args: Array<String>) {
         listOf(0, 1, 1),
     )
     checkEq("面板只给四个状态（未 FC / 未 AP 改成开关了）", STATUS_CHOICES.map { it.label }, listOf("全部", "已打过", "FC 的", "AP 的"))
+
+    // ── 歌曲详情页的「我的成绩」：一首歌 × 各难度 ──
+    val detailResults = listOf(
+        MusicResult(7, "master", fullCombo = true, allPerfect = true, highScore = 1_500_000),
+        // 同一难度重复行：分数取最高、FC/AP 取或
+        MusicResult(7, "master", fullCombo = true, allPerfect = false, highScore = 1_600_000),
+        MusicResult(7, "expert", fullCombo = true, allPerfect = false, highScore = 1_200_000),
+        // 别的歌，绝不能混进来
+        MusicResult(8, "master", fullCombo = true, allPerfect = true, highScore = 2_000_000),
+    )
+    val byDifficulty = songStatusByDifficulty(detailResults, 7)
+    checkEq("只装这首歌的难度（master / expert）", byDifficulty.keys.sorted(), listOf("expert", "master"))
+    checkEq("★ 重复行取最好：AP 仍为真", byDifficulty["master"]?.allPerfect, true)
+    checkEq("★ 重复行取最高分（不是第一条的分数）", byDifficulty["master"]?.highScore, 1_600_000L)
+    checkEq("expert 只有一个 FC", byDifficulty["expert"]?.fullCombo, true)
+    checkEq("没打过的歌返回空 map（不是全难度 0）", songStatusByDifficulty(detailResults, 999).size, 0)
+    checkEq(
+        "★ playStatusIndex 也带上了最高分（列表页不用，但口径必须一致）",
+        playStatusIndex(detailResults, "master")[7]?.highScore,
+        1_600_000L,
+    )
+    checkEq(
+        "★ 两个索引方向结果一致（同一批数据、同一套合并规则）",
+        playStatusIndex(detailResults, "master")[7]?.fullCombo,
+        byDifficulty["master"]?.fullCombo,
+    )
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))

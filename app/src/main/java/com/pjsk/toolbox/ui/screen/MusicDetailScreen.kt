@@ -60,6 +60,9 @@ import com.pjsk.toolbox.data.music.MusicDifficulty
 import com.pjsk.toolbox.data.music.MusicEventRef
 import com.pjsk.toolbox.data.music.MusicSinger
 import com.pjsk.toolbox.data.music.MusicUnitTag
+import com.pjsk.toolbox.data.profile.PlayerSnapshot
+import com.pjsk.toolbox.data.profile.songStatusByDifficulty
+import com.pjsk.toolbox.ui.common.rememberPlayerSnapshot
 import com.pjsk.toolbox.data.music.MusicVocal
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
@@ -116,6 +119,9 @@ fun MusicDetailScreen(
     val player = container.musicPlayer
     val playback by player.state.collectAsState()
 
+    // 绑定账号的本地快照；没绑定 / 没有缓存时是 null，整块「我的成绩」就不出现
+    val playerSnapshot = rememberPlayerSnapshot()
+
     // 按需载入：只在 musicId 变化时查一次（不养常驻缓存，理由见 MusicRepository）
     LaunchedEffect(musicId) {
         loading = true
@@ -163,6 +169,10 @@ fun MusicDetailScreen(
                     item { BasicInfo(detail = current) }
                     if (current.difficulties.isNotEmpty()) {
                         item { DifficultySection(rows = current.difficulties) }
+                    }
+                    // 我的成绩：只有绑定了账号才出现（没登录时整块不显示，连引导也不放）
+                    if (playerSnapshot != null) {
+                        item { MyScoreSection(detail = current, snapshot = playerSnapshot) }
                     }
                     if (current.vocals.isNotEmpty()) {
                         item {
@@ -405,6 +415,77 @@ private fun DifficultySection(rows: List<MusicDifficulty>) {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────
+// 我的成绩（绑定账号后才有）
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 「我的成绩」：这首歌在各难度上的 状态 + 最高分。
+ *
+ * 没打过的难度也列出来并标「未打」—— 这一屏的价值一半在"我知道这歌没碰过"，
+ * 把空行藏掉就看不出来了。数据只读快照里的 `userMusicResults`。
+ */
+@Composable
+private fun MyScoreSection(detail: MusicDetail, snapshot: PlayerSnapshot) {
+    val statuses = remember(detail.id, snapshot) {
+        songStatusByDifficulty(snapshot.musicResults, detail.id)
+    }
+    SectionTitle("我的成绩")
+    Column(modifier = Modifier.fillMaxWidth()) {
+        detail.difficulties.forEach { row ->
+            val key = row.kind.key.lowercase()
+            val status = statuses[key]
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = row.kind.abbr,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = row.kind.color,
+                    modifier = Modifier.width(52.dp),
+                )
+                Text(
+                    text = "Lv.${row.playLevel}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.width(56.dp),
+                )
+                // 徽章：AP / FC / 已打 / 未打
+                val (badge, tone) = when {
+                    status?.allPerfect == true -> "AP" to MaterialTheme.colorScheme.tertiary
+                    status?.fullCombo == true -> "FC" to MaterialTheme.colorScheme.primary
+                    status?.played == true -> "已打" to MaterialTheme.colorScheme.onSurfaceVariant
+                    else -> "未打" to MaterialTheme.colorScheme.outline
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(tone.copy(alpha = 0.16f))
+                        .padding(horizontal = 6.dp, vertical = 1.dp),
+                ) {
+                    Text(
+                        text = badge,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = tone,
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = if ((status?.highScore ?: 0L) > 0) formatScore(status!!.highScore) else "—",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+/** 分数上千分位分隔（1234567 → 1,234,567）。 */
+private fun formatScore(score: Long): String = "%,d".format(score)
 
 // ─────────────────────────────────────────────────────────────
 // 演唱版本（纯展示；阶段 3 起才有播放）
