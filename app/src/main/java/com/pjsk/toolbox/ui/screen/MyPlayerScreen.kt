@@ -489,6 +489,23 @@ fun MyPlayerScreen(
                 }
             }
 
+            // ── 组卡推荐 ──
+            // 放在「综合力」正下方：综合力回答"我现在这套多少力"，推荐回答"该用哪套"，
+            // 是同一个问题的两半。⚠️ 之前只有一个埋在「编成」页右上角的文字按钮，
+            // 用户找不到 —— 入口必须在「我的」页上直接可见。
+            CardModule(
+                title = "组卡推荐",
+                actionLabel = "开始推荐",
+                onAction = onOpenDeckRecommend,
+            ) {
+                Text(
+                    text = "从你持有的 ${snap.cards.size} 张卡里，找综合力最高的 5 张。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(4.dp))
+                HintText("试验中：引擎刚接上，结果可能不准确，不要拿它当组卡依据。")
+            }
+
             CardModule("角色等级") {
                 val chars = sortCharacters(snap.characters)
                 if (chars.isEmpty()) {
@@ -1266,6 +1283,7 @@ private fun serverLabel(server: String): String = when (server) {
     "en" -> "国际服"
     else -> server
 }
+
 
 
 

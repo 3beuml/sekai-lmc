@@ -81,7 +81,6 @@ import kotlinx.coroutines.withContext
 fun DeckScreen(
     region: ServerRegion,
     onBack: () -> Unit,
-    onOpenRecommend: () -> Unit = {},
     onOpenBind: () -> Unit,
     onOpenMyPlayer: () -> Unit,
     onOpenCard: (Int) -> Unit,
@@ -403,6 +402,7 @@ private fun DeckCardTile(
         )
     }
 }
+
 
 
 

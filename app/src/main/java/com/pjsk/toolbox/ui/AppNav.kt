@@ -475,7 +475,6 @@ fun AppNav() {
                     onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
                     onOpenMyPlayer = { navController.navigate(Routes.MY_PLAYER) },
                     onOpenCard = { cardId -> navController.navigate(Routes.cardDetail(cardId)) },
-                    onOpenRecommend = { navController.navigate(Routes.MY_DECK_RECOMMEND) },
                 )
             }
 
@@ -804,6 +803,7 @@ fun AppNav() {
         }
     }
 }
+
 
 
 
