@@ -2,6 +2,9 @@ package com.pjsk.toolbox.data.settings
 
 import android.content.Context
 import com.pjsk.toolbox.data.player.PlayMode
+import com.pjsk.toolbox.data.player.PlayerCoverMode
+import com.pjsk.toolbox.data.player.encodeCoverCardIds
+import com.pjsk.toolbox.data.player.parseCoverCardIds
 import com.pjsk.toolbox.data.profile.PlayerAccount
 import com.pjsk.toolbox.util.decodeFavoriteSongs
 import com.pjsk.toolbox.util.decodePreferredVocals
@@ -135,6 +138,39 @@ class AppSettings(context: Context) {
         _scoreMetric.value = metric
     }
 
+    /**
+     * 播放器封面来源：歌曲曲绘（默认）还是自定义卡面。
+     *
+     * 默认 [PlayerCoverMode.SONG_JACKET]，所以老用户升级上来观感完全不变 ——
+     * 「用卡面当封面」是显式选择才会发生的事。
+     */
+    private val _playerCoverMode = MutableStateFlow(
+        enumOrDefault(prefs.getString(KEY_PLAYER_COVER_MODE, null), PlayerCoverMode.SONG_JACKET),
+    )
+    val playerCoverMode: StateFlow<PlayerCoverMode> = _playerCoverMode.asStateFlow()
+
+    fun setPlayerCoverMode(mode: PlayerCoverMode) {
+        prefs.edit().putString(KEY_PLAYER_COVER_MODE, mode.name).apply()
+        _playerCoverMode.value = mode
+    }
+
+    /**
+     * 用户为「自定义卡面」选定的卡牌 id 集合（只存 id，不存筛选条件）。
+     *
+     * 为什么存 id 而不是筛选条件：卡表每次更新都会让"同一套条件"筛出不同的结果，
+     * 而用户的心智是"我选的就是这几张"。上限见 [MAX_COVER_CARDS]。
+     */
+    private val _playerCoverCardIds = MutableStateFlow(
+        parseCoverCardIds(prefs.getString(KEY_PLAYER_COVER_CARDS, null)),
+    )
+    val playerCoverCardIds: StateFlow<List<Int>> = _playerCoverCardIds.asStateFlow()
+
+    fun setPlayerCoverCardIds(ids: Collection<Int>) {
+        val encoded = encodeCoverCardIds(ids)
+        prefs.edit().putString(KEY_PLAYER_COVER_CARDS, encoded).apply()
+        _playerCoverCardIds.value = parseCoverCardIds(encoded)
+    }
+
     fun setThemeMode(mode: ThemeMode) {
         prefs.edit().putString(KEY_THEME, mode.name).apply()
         _themeMode.value = mode
@@ -256,6 +292,8 @@ class AppSettings(context: Context) {
         const val KEY_PLAY_MODE = "play_mode"
         const val KEY_VOCAL_MODE = "vocal_mode"
         const val KEY_SCORE_METRIC = "score_metric"
+        const val KEY_PLAYER_COVER_MODE = "player_cover_mode"
+        const val KEY_PLAYER_COVER_CARDS = "player_cover_cards"
         const val KEY_PREFERRED_VOCALS = "preferred_vocals"
         const val KEY_PLAYER_SERVER = "player_server"
         const val KEY_PLAYER_GAME_ID = "player_game_id"

@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.ui.player
+﻿package com.pjsk.toolbox.ui.player
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -26,6 +26,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -72,6 +73,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pjsk.toolbox.PjskApp
+import com.pjsk.toolbox.data.card.Card
+import com.pjsk.toolbox.data.card.CardArtPlan
+import com.pjsk.toolbox.data.player.PlayerCoverMode
+import com.pjsk.toolbox.data.player.pickCoverCardId
 import com.pjsk.toolbox.data.music.MusicDetail
 import com.pjsk.toolbox.data.music.MusicVocal
 import com.pjsk.toolbox.data.music.TIME_UNSET_MS
@@ -167,6 +172,7 @@ fun PlayerScreen(
     val track = state.track
     var showVersions by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
+    var showCoverSheet by remember { mutableStateOf(false) }
     var showTimer by remember { mutableStateOf(false) }
     // 自定义时长：输入框展开状态 + 用户敲的内容（不持久化，弹层关掉就忘）
     var showCustomInput by remember { mutableStateOf(false) }
@@ -191,39 +197,77 @@ fun PlayerScreen(
     }
     if (track == null) return
 
-    // ── 封面取色（Step 3）──
+    // ── 封面来源：歌曲曲绘 / 自定义卡面（随机） ──
     //
-    // 规则（用户拍板）：**只在切歌时换色，切版本不换** —— 所以下面那个 map 的 key
-    // 只用 `musicId`，不含 vocalId；换版本时 key 不变，取色不会重算、界面不会闪。
+    // 规则（用户拍板）：
+    //  - 随机**只在切歌时**重新抽，切版本不动（沿用"切版本不换色"那条规则）；
+    //  - 卡面集合里只有一张时就是它，不"随机"；
+    //  - 集合为空 / 选中的卡都不在卡表里了 → **回退曲绘**，不显示空白。
+    val coverMode by container.appSettings.playerCoverMode.collectAsState()
+    val coverSelectedIds by container.appSettings.playerCoverCardIds.collectAsState()
+    val allCards by remember { container.cardRepository.cards }.collectAsState(initial = emptyList())
+    val cardsById = remember(allCards) { allCards.associateBy { it.id } }
+    val allCharacters by remember { container.cardRepository.characters }.collectAsState(initial = emptyList())
+    var coverCardId by remember { mutableStateOf<Int?>(null) }
+    // 一个跨重组存活的 Random：每次新建 Random() 在同一毫秒可能拿到相同种子，
+    // 表现是"随机"连着给出同一张。
+    val coverRandom = remember { kotlin.random.Random(System.nanoTime()) }
+    LaunchedEffect(track.musicId, coverMode, coverSelectedIds) {
+        if (coverMode != PlayerCoverMode.CARD_ART) {
+            coverCardId = null
+            return@LaunchedEffect
+        }
+        val valid = coverSelectedIds.filter { cardsById.containsKey(it) }
+        if (valid.isEmpty()) {
+            coverCardId = null
+            return@LaunchedEffect
+        }
+        coverCardId = pickCoverCardId(valid, previous = coverCardId, random = coverRandom)
+    }
+    // 卡面用「觉醒后优先」：有觉醒后就用觉醒后（更漂亮，这是装饰用途），
+    // 1★/2★/生日卡没有觉醒后（`NORMAL_ONLY`）才用未觉醒 —— 靠 CardArtPlan 判断，
+    // **不要靠 404 兜底**（那会让封面空一下再回退）。
+    val coverCard: Card? = coverCardId?.let { cardsById[it] }
+    val coverUrl: String = if (coverCard != null) {
+        AssetUrls.cardImage(
+            region = region,
+            assetbundleName = coverCard.assetbundleName,
+            trained = coverCard.artPlan != CardArtPlan.NORMAL_ONLY,
+            size = AssetUrls.CardSize.LARGE,
+        )
+    } else {
+        AssetUrls.musicJacket(region, detail?.assetbundleName ?: track.jacketAssetbundleName)
+    }
+    // 取色缓存的键**必须跟着封面走**：卡面模式下同一首歌每次可能显示不同卡，
+    // 用 musicId 当 key 会出现"封面换了、颜色还是上一张的"。
+    val coverKey = coverCard?.let { "card-${it.id}" } ?: "song-${track.musicId}"
+
+    // ── 封面取色（Step 3）──
     //
     // 缓存刻意允许 value 为 null：null 表示"这张封面算过、但不适合取色"，
     // 与"还没算过"是两回事 —— 否则每次重组都会重算一遍失败的结果。
     val appContext = LocalContext.current.applicationContext
     val themeMode by container.appSettings.themeMode.collectAsState()
     val darkTheme = themeMode.resolveDark()
-    val paletteCache = remember { LinkedHashMap<Int, PlayerPaletteArgb?>() }
+    val paletteCache = remember { LinkedHashMap<String, PlayerPaletteArgb?>() }
     var coverPalette by remember { mutableStateOf<PlayerPaletteArgb?>(null) }
 
-    LaunchedEffect(track.musicId, darkTheme) {
-        val id = track.musicId
+    LaunchedEffect(coverKey, darkTheme, coverUrl) {
+        val id = coverKey
         if (paletteCache.containsKey(id)) {
             coverPalette = paletteCache[id]
             return@LaunchedEffect
         }
-        // 先把上一首的颜色摘掉，避免"这首还没算完、却在用上首颜色"的错觉
+        // 先把上一张的颜色摘掉，避免"这张还没算完、却在用上张颜色"的错觉
         coverPalette = null
         val extracted = withContext(Dispatchers.IO) {
             runCatching {
-                val url = AssetUrls.musicJacket(
-                    region,
-                    detail?.assetbundleName ?: track.jacketAssetbundleName,
-                )
                 // ⚠️ 两个参数都是必须的：
-                //  - size(72, 72)：量化只要几十见方就够，别让 Coil 解一张 1080p 原图；
+                //  - size(72, 72)：量化只要几十见方就够，别让 Coil 解一张 2520×1440 的原图；
                 //  - allowHardware(false)：**硬件位图读不了像素**（getPixels 会拿到全黑），
-                //    这是 Coil 的默认值 —— 这一条不写，现象是"取色永远返回黑色"。
+                //    这是 Coil的默认值 —— 这一条不写，现象是"取色永远返回黑色"。
                 val request = ImageRequest.Builder(appContext)
-                    .data(url)
+                    .data(coverUrl)
                     .size(72, 72)
                     .allowHardware(false)
                     .build()
@@ -240,7 +284,7 @@ fun PlayerScreen(
             }.getOrNull()
         }
         paletteCache[id] = extracted
-        // 只留最近 12 首：一张调色板不到 100 字节，但没必要无限涨
+        // 只留最近 12 张：一张调色板不到 100 字节，但没必要无限涨
         while (paletteCache.size > 12) {
             paletteCache.remove(paletteCache.keys.first())
         }
@@ -248,7 +292,7 @@ fun PlayerScreen(
         // （`adb logcat -d -s PlayerPalette:I`）。null = 这张封面不适合取色，走主题色。
         android.util.Log.i(
             "PlayerPalette",
-            "musicId=$id dark=$darkTheme " +
+            "cover=$id dark=$darkTheme " +
                 "seed=${extracted?.seed?.let { "#%06X".format(it and 0xFFFFFF) } ?: "none"} " +
                 "primary=${extracted?.primary?.let { "#%06X".format(it and 0xFFFFFF) } ?: "theme"} " +
                 "top=${extracted?.gradientTop?.let { "#%06X".format(it and 0xFFFFFF) } ?: "theme"}",
@@ -436,16 +480,27 @@ fun PlayerScreen(
         }
 
         // ── 大封面：吃了剩余空间，点了进歌曲详情 ──
+        //
+        // 两种比例各用各的：
+        //  - 曲绘 = **正方形**（原来的样子，1:1 的曲绘不留白）；
+        //  - 卡面 = **16:9 横幅**（卡面原始 2520×1440，硬塞进正方形要裁掉左右各 21%）。
+        //    340dp 宽时只有 191dp 高，比正方形**更矮**，底部按钮的空间反而更宽松。
         BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
         ) {
-            val side = minOf(340.dp, maxHeight, maxWidth)
+            val cardMode = coverCard != null
+            val coverWidth = if (cardMode) {
+                minOf(340.dp, maxWidth, maxHeight * 16f / 9f)
+            } else {
+                minOf(340.dp, maxHeight, maxWidth)
+            }
+            val coverHeight = if (cardMode) coverWidth * 9f / 16f else coverWidth
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .size(side)
+                    .size(coverWidth, coverHeight)
                     // 圆角 22dp → **28dp**：M3 里"大圆角 + 有落差"是封面的标准处理，
                     // 22dp 在小屏上偏"方"，加大一档更接近 Google 系播放器的观感。
                     .shadow(
@@ -461,10 +516,7 @@ fun PlayerScreen(
                     .clickable { onOpenDetail(track.musicId) },
             ) {
                 RemoteImage(
-                    url = AssetUrls.musicJacket(
-                        region,
-                        detail?.assetbundleName ?: track.jacketAssetbundleName,
-                    ),
+                    url = coverUrl,
                     contentDescription = "查看歌曲详情",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
@@ -636,6 +688,12 @@ fun PlayerScreen(
             PlayerAction(label = "列表", icon = Icons.Default.QueueMusic) {
                 showQueue = true
             }
+            // 封面来源（曲绘 / 自定义卡面）。放在最后：它是"装饰性"设置，
+            // 不该挤在歌词/版本/模式这些日常操作中间。
+            PlayerAction(
+                label = if (coverMode == PlayerCoverMode.CARD_ART) "卡面" else "封面",
+                icon = Icons.Default.Image,
+            ) { showCoverSheet = true }
         }
     }
     }
@@ -645,6 +703,23 @@ fun PlayerScreen(
     // ⚠️ **故意没有「关闭」这一项**（用户要求）：默认就是"一直播放"。
     // 取消的办法是**再点一次当前选中的那一项**（规则在 sleepTimerClickAction 里，自检守着），
     // 弹层底部写一行小字说明，不然用户设完就撤不掉了。
+    // ── 封面来源弹层（曲绘 / 自定义卡面）──
+    // 和其他几个弹层一样放在 MaterialTheme(playerColors) 之外：这是"列表类"界面，
+    // 跟着封面色变反而会让"这属于播放器还是属于 App"变得暧昧。
+    if (showCoverSheet) {
+        PlayerCoverSheet(
+            mode = coverMode,
+            selectedIds = coverSelectedIds,
+            cards = allCards,
+            characters = allCharacters,
+            nameLanguage = nameLanguage,
+            region = region,
+            onModeChange = { container.appSettings.setPlayerCoverMode(it) },
+            onSelectionChange = { container.appSettings.setPlayerCoverCardIds(it) },
+            onDismiss = { showCoverSheet = false },
+        )
+    }
+
     if (showTimer) {
         ModalBottomSheet(
             onDismissRequest = { showTimer = false },
@@ -939,4 +1014,5 @@ private fun PlayerAction(
         }
     }
 }
+
 

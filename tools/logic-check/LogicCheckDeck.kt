@@ -1,4 +1,4 @@
-
+﻿
 import com.pjsk.toolbox.data.deck.DeckLiveType
 import com.pjsk.toolbox.data.deck.DeckTarget
 import com.pjsk.toolbox.data.deck.parseDeckRecommendResult
@@ -6,6 +6,10 @@ import com.pjsk.toolbox.data.deck.buildRecommendParams
 import com.pjsk.toolbox.data.deck.restoreMusicMetasJson
 import com.pjsk.toolbox.data.remote.DataModule
 import com.pjsk.toolbox.data.remote.TableCatalog
+import com.pjsk.toolbox.data.player.MAX_COVER_CARDS
+import com.pjsk.toolbox.data.player.encodeCoverCardIds
+import com.pjsk.toolbox.data.player.parseCoverCardIds
+import com.pjsk.toolbox.data.player.pickCoverCardId
 import com.pjsk.toolbox.data.sync.RowProjectors
 import com.pjsk.toolbox.ui.common.intOrNull
 import kotlinx.serialization.json.JsonObject
@@ -261,6 +265,50 @@ checkEq(
     ),
     listOf(265, 260, null),
 )
+
+// ── 播放器封面：随机挑选 + 偏好编解码 ──
+// 随机的错法都是"看着不对"（连着两次同一张 / 挑到集合外的 id / 空集合崩），
+// 所以用固定种子的 Random 断言行为，而不是断言"某个随机结果"。
+val coverPool = listOf(101, 102, 103)
+val seqRandom = kotlin.random.Random(42)
+var previous: Int? = null
+var repeats = 0
+val picked = mutableListOf<Int>()
+repeat(50) {
+    val next = pickCoverCardId(coverPool, previous, seqRandom)
+    check("随机结果不能为 null（集合非空）", next != null)
+    if (next == previous) repeats++
+    next?.let { picked += it }
+    previous = next
+}
+check("★ 连续 50 次随机**从不**与上一次相同", repeats == 0, "重复 $repeats 次")
+check("★ 挑出来的 id 一定在集合内", picked.all { it in coverPool })
+check("随机确实覆盖到多张（不是永远给同一张）", picked.toSet().size >= 2)
+checkEq(
+    "★ 单卡集合永远是它自己（不做随机）",
+    (1..20).map { pickCoverCardId(listOf(7), previous = 7, random = seqRandom) }.distinct(),
+    listOf(7),
+)
+checkEq("空集合返回 null（调用方回退曲绘）", pickCoverCardId(emptyList(), previous = 1, random = seqRandom), null)
+checkEq(
+    "上一张不在集合里时也不崩（照常挑）",
+    pickCoverCardId(listOf(1, 2), previous = 999, random = kotlin.random.Random(1)) in listOf(1, 2),
+    true,
+)
+checkEq(
+    "★ 偏好编解码往返一致",
+    parseCoverCardIds(encodeCoverCardIds(listOf(11, 22, 33))),
+    listOf(11, 22, 33),
+)
+checkEq("脏数据被丢掉（非数字/0/负数）", parseCoverCardIds("11, abc, 0, -5, 22"), listOf(11, 22))
+checkEq("重复 id 去重", parseCoverCardIds("11,11,22"), listOf(11, 22))
+checkEq("空串 / null 解析成空列表", listOf(parseCoverCardIds(""), parseCoverCardIds(null)), listOf(emptyList(), emptyList()))
+checkEq(
+    "★ 超量被截断到上限（不是静默全存）",
+    parseCoverCardIds((1..500).joinToString(",")).size,
+    MAX_COVER_CARDS,
+)
+checkEq("编码也守上限", encodeCoverCardIds((1..500).toList()).split(',').size, MAX_COVER_CARDS)
 
 // ── musicMetas：上游 33 字段 → 引擎要的 12 个 ──
 val metaRaw = """
