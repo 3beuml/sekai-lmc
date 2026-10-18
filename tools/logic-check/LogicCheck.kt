@@ -3656,13 +3656,22 @@ fun main(args: Array<String>) {
     checkEq("episodes 缺失时是 0 篇", parseEpisodeStatus(null).read, 0)
 
     checkEq(
-        "当前编成按 队长→副队长→member1..3 取卡 id，去重",
+        "当前编成按 队长→副队长→member1.. 取卡 id，去重",
         currentDeckCardIds(
             json.parseToJsonElement(
                 """{"deckId":1,"leader":10,"subLeader":11,"member1":12,"member2":13,"member3":13}""",
             ) as JsonObject,
         ),
         listOf(10, 11, 12, 13),
+    )
+    checkEq(
+        "★ 编成最多取 5 张（leader/subLeader 与 member 重叠时不会凑出 7 张）",
+        currentDeckCardIds(
+            json.parseToJsonElement(
+                """{"leader":1,"subLeader":2,"member1":3,"member2":4,"member3":5,"member4":6,"member5":7}""",
+            ) as JsonObject,
+        ),
+        listOf(1, 2, 3, 4, 5),
     )
 
     // ─────────────────────────────────────────────────────────
@@ -3695,6 +3704,7 @@ private fun JsonObject.boolValue(key: String): Boolean? =
 private fun JsonObject.intList(key: String): List<Int> =
     (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content?.toDoubleOrNull()?.toInt() }
         ?: emptyList()
+
 
 
 

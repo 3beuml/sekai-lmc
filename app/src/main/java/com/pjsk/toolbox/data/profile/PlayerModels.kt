@@ -583,11 +583,15 @@ internal fun isAlreadyRead(raw: String): Boolean {
 data class EpisodeStatus(val read: Int, val keys: Set<Int>)
 
 /**
- * 当前编成的 5 张卡（队长 → 副队长 → member1..3），按出现顺序去重。
+ * 当前编成的 5 张卡（队长 → 副队长 → member1..），按出现顺序去重后**只取前 5 张**。
  *
- * 字段名来自实测（PROJECT_MEMORY §15.3）：`userDecks` 的行是
+ * 字段名来自实测（PROJECT_MEMORY §15.3 / 绑定调研）：`userDecks` 的行是
  * `{deckId, name, leader, subLeader, member1..member5}`，其中 `leader` 是**卡 id**。
- * 这里不假设 `member4/5` 不存在（上游将来可能扩到 6 张），有就收。
+ *
+ * ⚠️ 为什么必须截到 5 张：`leader`/`subLeader` 与 `member1..5` **可能指向同一批卡**
+ * （队长通常也在成员列表里）。不截的话可能凑出 7 个不同的 id，综合力就会被算成
+ * 7 张卡的价值 —— 数字高出一大截，却完全看不出哪里错了。
+ * 游戏里一套编成就是 5 张，所以截断是安全的。
  */
 fun currentDeckCardIds(deck: JsonObject?): List<Int> {
     deck ?: return emptyList()
@@ -597,7 +601,7 @@ fun currentDeckCardIds(deck: JsonObject?): List<Int> {
             val id = deck.int(key)
             if (id > 0) out.add(id)
         }
-    return out.toList()
+    return out.toList().take(5)
 }
 
 // ── JsonObject 取值小工具（都容错，缺了给默认值；上游加减字段不让界面崩） ──
