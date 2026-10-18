@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.ui.player
+﻿package com.pjsk.toolbox.ui.player
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -13,9 +14,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -27,13 +27,9 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,60 +41,75 @@ import com.pjsk.toolbox.data.card.Card
 import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.PjskCharacter
 import com.pjsk.toolbox.data.card.displayNameFor
-import com.pjsk.toolbox.data.player.MAX_COVER_CARDS
+import com.pjsk.toolbox.data.player.COVER_RARITY_KEYS
+import com.pjsk.toolbox.data.player.CoverAspect
+import com.pjsk.toolbox.data.player.CoverCandidate
+import com.pjsk.toolbox.data.player.CoverFilter
+import com.pjsk.toolbox.data.player.CoverVariant
 import com.pjsk.toolbox.data.player.PlayerCoverMode
+import com.pjsk.toolbox.data.player.coverRarityLabel
+import com.pjsk.toolbox.data.player.expandCoverVariants
+import com.pjsk.toolbox.data.player.matchesCoverFilter
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.settings.NameLanguage
 import com.pjsk.toolbox.ui.common.RemoteImage
 
 /**
- * 「播放器封面」选择弹层。
+ * 「播放器封面」设置弹层（歌曲列表顶栏与播放器**共用这一个**）。
  *
- * ## 为什么先只按角色选
+ * ## 为什么是"条件式"而不是"逐张勾选"
  *
- * 用户的原话是"可以选一个角色的不同卡牌" —— 按角色取卡就覆盖了这个需求。
- * 完整的筛选面板（搜索/稀有度/属性/卡池类型）以后想接时，**塞进同一个 sheet 即可**，
- * 因为卡的取用已经走了 `cards.filter { it.characterId == … }`，换成分 `filterCards(cards, query)`
- * 是一行的事。
+ * 用户的心智是"我要一歌的 ★4 卡面"这种条件，而不是"这 37 张卡的清单"：
+ * 新卡上线后条件天然把它们包含进来。所以这里**不做逐张排除**，只给三个维度：
+ * 角色（多选）/ 星级（多选）/ 觉醒版本。想看具体是什么，下面有命中的预览网格。
  *
- * ## 为什么存「卡 id 列表」而不是「筛选条件」
+ * ## 三处必须让用户看见的东西
  *
- * 卡表每次更新都会让同一套条件筛出不同的卡；而用户的心智是"我选的就是这几张"。
- * 存 id 还顺带解决了"换区服后条件含义变化"的问题。
- *
- * ## 空集合的行为
- *
- * 一张都没选时播放器**照旧显示曲绘**（不是空白）。这一点在下面有一行明说，
- * 否则用户会以为"开了自定义却坏掉了"。
+ * 1. **命中张数** —— 条件越窄越可控，但用户看不见后果就只是瞎猜；
+ * 2. **觉醒后排除的张数** —— ★1/★2/生日卡没有觉醒后卡面，"只要觉醒后"会把它们剔掉。
+ *    不说出来用户会以为"我勾了 ★1 怎么没有"；
+ * 3. **命中 0 张会回退曲绘** —— 否则他以为功能坏了。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerCoverSheet(
     mode: PlayerCoverMode,
-    selectedIds: List<Int>,
+    aspect: CoverAspect,
+    filter: CoverFilter,
     cards: List<Card>,
     characters: List<PjskCharacter>,
     nameLanguage: NameLanguage,
     region: ServerRegion,
     onModeChange: (PlayerCoverMode) -> Unit,
-    onSelectionChange: (List<Int>) -> Unit,
+    onAspectChange: (CoverAspect) -> Unit,
+    onFilterChange: (CoverFilter) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    // 默认停在这张已选卡所属的角色上；没选过就停第一个。
-    // ⚠️ key 只用 `characters`：如果连 `selectedIds` 也当 key，勾一张卡就会把角色重置
-    // （虽然重置到的还是同一角色，但"清空该角色"之后会突然跳走，看着像 bug）。
-    var characterId by remember(characters) {
-        mutableStateOf(
-            selectedIds.firstNotNullOfOrNull { id -> cards.firstOrNull { it.id == id }?.characterId }
-                ?: characters.firstOrNull()?.id
-                ?: 1,
-        )
+    // 条件 → 候选（与播放器里同一套判定函数，不各写一遍）
+    val candidates = remember(cards, filter) {
+        cards.mapNotNull { card ->
+            CoverCandidate(
+                id = card.id,
+                characterId = card.characterId,
+                rarityKey = card.rarityKey,
+                trainedAvailable = card.artPlan != CardArtPlan.NORMAL_ONLY,
+            ).takeIf { matchesCoverFilter(it, filter) }
+        }
     }
-    val characterCards = remember(cards, characterId) {
-        cards.filter { it.characterId == characterId }.sortedByDescending { it.releaseAt }
+    val picks = remember(candidates, filter.variant) {
+        expandCoverVariants(candidates, filter.variant)
     }
-    val selectedSet = remember(selectedIds) { selectedIds.toSet() }
+    // "按变体展开后会被排除"的张数：候选里有、但展开后一张都没有的卡
+    val excludedByVariant = remember(candidates, picks) {
+        val keptIds = picks.map { it.cardId }.toSet()
+        candidates.count { it.id !in keptIds }
+    }
+    val hitCards = remember(picks, cards) {
+        val byId = cards.associateBy { it.id }
+        picks.mapNotNull { byId[it.cardId] }.distinctBy { it.id }
+    }
+    val trainedOf = remember(picks) { picks.associate { it.cardId to it.trained } }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -107,9 +118,9 @@ fun PlayerCoverSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 640.dp)
+                .heightIn(max = 660.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(bottom = 24.dp),
+                .padding(bottom = 28.dp),
         ) {
             Text(
                 "播放器封面",
@@ -118,7 +129,7 @@ fun PlayerCoverSheet(
             )
             Spacer(Modifier.height(8.dp))
 
-            // ── 模式 ──
+            // ── 来源 ──
             Row(
                 modifier = Modifier.padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -139,26 +150,44 @@ fun PlayerCoverSheet(
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
 
+            // ── 比例（只有卡面模式才有意义）──
             if (mode == PlayerCoverMode.CARD_ART) {
                 Spacer(Modifier.height(12.dp))
-
-                // ── 角色 ──
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("比例", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(48.dp))
+                    CoverAspect.entries.forEach { option ->
+                        FilterChip(
+                            selected = option == aspect,
+                            onClick = { onAspectChange(option) },
+                            label = { Text(option.label) },
+                        )
+                    }
+                }
                 Text(
-                    "角色",
-                    style = MaterialTheme.typography.labelMedium,
+                    text = CoverAspect.entries.first { it == aspect }.description,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
+
+                // ── 角色（多选，不选 = 不限）──
+                Spacer(Modifier.height(12.dp))
+                ConditionTitle("角色", hint = if (filter.characterIds.isEmpty()) "不选 = 不限" else "已选 ${filter.characterIds.size} 位")
                 Spacer(Modifier.height(6.dp))
                 LazyRow(
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(characters, key = { it.id }) { character ->
-                        val chosen = character.id == characterId
+                        val chosen = character.id in filter.characterIds
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Box(
                                 modifier = Modifier
-                                    .size(52.dp)
+                                    .size(50.dp)
                                     .clip(CircleShape)
                                     .background(MaterialTheme.colorScheme.surfaceContainerHighest)
                                     .then(
@@ -168,19 +197,29 @@ fun PlayerCoverSheet(
                                             Modifier
                                         },
                                     )
-                                    .clickable { characterId = character.id },
+                                    .clickable {
+                                        onFilterChange(
+                                            filter.copy(
+                                                characterIds = if (chosen) {
+                                                    filter.characterIds - character.id
+                                                } else {
+                                                    filter.characterIds + character.id
+                                                },
+                                            ),
+                                        )
+                                    },
                             ) {
                                 AsyncImage(
                                     model = AssetUrls.characterAvatar(region, character.id),
                                     contentDescription = character.displayNameFor(nameLanguage),
                                     contentScale = ContentScale.Crop,
                                     alignment = Alignment.TopCenter,
-                                    modifier = Modifier.size(52.dp),
+                                    modifier = Modifier.size(50.dp),
                                 )
                             }
                             Spacer(Modifier.height(2.dp))
                             Text(
-                                text = " ${character.displayNameFor(nameLanguage)} ".trim(),
+                                text = character.displayNameFor(nameLanguage),
                                 style = MaterialTheme.typography.labelSmall,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -194,65 +233,121 @@ fun PlayerCoverSheet(
                     }
                 }
 
-                Spacer(Modifier.height(10.dp))
+                // ── 星级（多选）──
+                Spacer(Modifier.height(12.dp))
+                ConditionTitle("星级", hint = if (filter.rarityKeys.isEmpty()) "不选 = 不限" else "已选 ${filter.rarityKeys.size} 档")
+                Spacer(Modifier.height(6.dp))
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text(
-                        text = "该角色 ${characterCards.size} 张 · 已选 ${selectedIds.size}/$MAX_COVER_CARDS",
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(
-                        onClick = {
-                            // 全选该角色（受总上限约束；超出的部分不静默丢，而是截断后由计数显示）
-                            val merged = selectedIds + characterCards.map { it.id }
-                            onSelectionChange(merged.distinct().take(MAX_COVER_CARDS))
-                        },
-                    ) { Text("全选") }
-                    TextButton(
-                        onClick = {
-                            val ids = characterCards.map { it.id }.toSet()
-                            onSelectionChange(selectedIds.filterNot { it in ids })
-                        },
-                    ) { Text("清空该角色") }
+                    COVER_RARITY_KEYS.forEach { key ->
+                        val chosen = key in filter.rarityKeys
+                        FilterChip(
+                            selected = chosen,
+                            onClick = {
+                                onFilterChange(
+                                    filter.copy(
+                                        rarityKeys = if (chosen) {
+                                            filter.rarityKeys - key
+                                        } else {
+                                            filter.rarityKeys + key
+                                        },
+                                    ),
+                                )
+                            },
+                            label = { Text(coverRarityLabel(key)) },
+                        )
+                    }
                 }
 
-                // ── 该角色的卡（3 列）──
-                characterCards.chunked(3).forEach { rowCards ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        rowCards.forEach { card ->
-                            CardPickTile(
-                                card = card,
-                                trained = card.artPlan != CardArtPlan.NORMAL_ONLY,
-                                region = region,
-                                selected = card.id in selectedSet,
-                                modifier = Modifier.weight(1f),
-                                onClick = {
-                                    val next = if (card.id in selectedSet) {
-                                        selectedIds - card.id
-                                    } else {
-                                        (selectedIds + card.id).take(MAX_COVER_CARDS)
-                                    }
-                                    onSelectionChange(next)
-                                },
-                            )
+                // ── 觉醒版本 ──
+                Spacer(Modifier.height(12.dp))
+                ConditionTitle("卡面版本", hint = null)
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CoverVariant.entries.forEach { option ->
+                        FilterChip(
+                            selected = option == filter.variant,
+                            onClick = { onFilterChange(filter.copy(variant = option)) },
+                            label = { Text(option.label) },
+                        )
+                    }
+                }
+                Text(
+                    text = filter.variant.description,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+
+                // ── 命中结果：必须让用户看见后果 ──
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = buildString {
+                        append("命中 ${hitCards.size} 张")
+                        if (excludedByVariant > 0) {
+                            append("（另有 $excludedByVariant 张因为**没有觉醒后卡面**被排除）")
                         }
-                        repeat(3 - rowCards.size) { Spacer(Modifier.weight(1f)) }
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (hitCards.isEmpty()) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+
+                if (hitCards.isEmpty()) {
+                    Text(
+                        "没有命中任何卡 → 播放器会继续用**歌曲曲绘**。把条件放宽一点试试。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                } else {
+                    Spacer(Modifier.height(8.dp))
+                    // 预览前 9 张（只读）：让用户确认"这条条件筛出来的长什么样"
+                    hitCards.take(9).chunked(3).forEach { rowCards ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            rowCards.forEach { card ->
+                                RemoteImage(
+                                    url = AssetUrls.cardImage(
+                                        region,
+                                        card.assetbundleName,
+                                        trainedOf[card.id] ?: false,
+                                        AssetUrls.CardSize.SMALL,
+                                    ),
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .aspectRatio(16f / 9f)
+                                        .clip(RoundedCornerShape(8.dp)),
+                                )
+                            }
+                            repeat(3 - rowCards.size) { Spacer(Modifier.weight(1f)) }
+                        }
+                    }
+                    if (hitCards.size > 9) {
+                        Text(
+                            "…以及另外 ${hitCards.size - 9} 张",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp),
+                        )
                     }
                 }
 
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    text = if (selectedIds.isEmpty()) {
-                        "一张都没选 → 播放器继续用**歌曲曲绘**。选中的卡会在**每次切歌时随机**出现一张。"
-                    } else {
-                        "已选 ${selectedIds.size} 张：**每次切歌随机**显示其中一张，播放器配色会跟着封面变。"
-                    },
+                    "**每次切歌随机**显示一张，播放器配色会跟着封面变；切版本不换封面。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp),
@@ -262,42 +357,20 @@ fun PlayerCoverSheet(
     }
 }
 
-/** 选卡格：16:9 卡面 + 选中描边。 */
 @Composable
-private fun CardPickTile(
-    card: Card,
-    trained: Boolean,
-    region: ServerRegion,
-    selected: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    Column(modifier = modifier.clickable(onClick = onClick)) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
-                .clip(RoundedCornerShape(8.dp))
-                .then(
-                    if (selected) {
-                        Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
-                    } else {
-                        Modifier
-                    },
-                ),
-        ) {
-            RemoteImage(
-                url = AssetUrls.cardImage(region, card.assetbundleName, trained, AssetUrls.CardSize.SMALL),
-                contentDescription = null,
-                modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+private fun ConditionTitle(text: String, hint: String?) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text, style = MaterialTheme.typography.labelMedium)
+        if (hint != null) {
+            Spacer(Modifier.size(6.dp))
+            Text(
+                hint,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Spacer(Modifier.height(2.dp))
-        Text(
-            text = if (selected) "已选" else " ",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary,
-            maxLines = 1,
-        )
     }
 }

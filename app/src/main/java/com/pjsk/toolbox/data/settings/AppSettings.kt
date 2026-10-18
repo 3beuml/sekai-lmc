@@ -1,10 +1,15 @@
-package com.pjsk.toolbox.data.settings
+﻿package com.pjsk.toolbox.data.settings
 
 import android.content.Context
 import com.pjsk.toolbox.data.player.PlayMode
+import com.pjsk.toolbox.data.player.CoverAspect
+import com.pjsk.toolbox.data.player.CoverFilter
+import com.pjsk.toolbox.data.player.CoverVariant
+import com.pjsk.toolbox.data.player.encodeIdSet
+import com.pjsk.toolbox.data.player.encodeRarityKeys
+import com.pjsk.toolbox.data.player.parseIdSet
+import com.pjsk.toolbox.data.player.parseRarityKeys
 import com.pjsk.toolbox.data.player.PlayerCoverMode
-import com.pjsk.toolbox.data.player.encodeCoverCardIds
-import com.pjsk.toolbox.data.player.parseCoverCardIds
 import com.pjsk.toolbox.data.profile.PlayerAccount
 import com.pjsk.toolbox.util.decodeFavoriteSongs
 import com.pjsk.toolbox.util.decodePreferredVocals
@@ -155,20 +160,42 @@ class AppSettings(context: Context) {
     }
 
     /**
-     * 用户为「自定义卡面」选定的卡牌 id 集合（只存 id，不存筛选条件）。
+     * 用户为「自定义卡面」设置的**筛选条件**（角色多选 / 星级多选 / 觉醒前后）。
      *
-     * 为什么存 id 而不是筛选条件：卡表每次更新都会让"同一套条件"筛出不同的结果，
-     * 而用户的心智是"我选的就是这几张"。上限见 [MAX_COVER_CARDS]。
+     * 为什么存条件而不是卡 id 列表：用户的心智是"我要一歌的 ★4 卡面"，
+     * 新卡上线后条件天然把它们包含进来（这正是"便于筛选增加"的含义）。
+     * 代价是命中会随卡表变化 —— 所以选择界面必须实时显示命中张数。
      */
-    private val _playerCoverCardIds = MutableStateFlow(
-        parseCoverCardIds(prefs.getString(KEY_PLAYER_COVER_CARDS, null)),
+    private val _playerCoverFilter = MutableStateFlow(
+        CoverFilter(
+            characterIds = parseIdSet(prefs.getString(KEY_PLAYER_COVER_CHARS, null)),
+            rarityKeys = parseRarityKeys(prefs.getString(KEY_PLAYER_COVER_RARITIES, null)),
+            variant = enumOrDefault(
+                prefs.getString(KEY_PLAYER_COVER_VARIANT, null),
+                CoverVariant.BOTH,
+            ),
+        ),
     )
-    val playerCoverCardIds: StateFlow<List<Int>> = _playerCoverCardIds.asStateFlow()
+    val playerCoverFilter: StateFlow<CoverFilter> = _playerCoverFilter.asStateFlow()
 
-    fun setPlayerCoverCardIds(ids: Collection<Int>) {
-        val encoded = encodeCoverCardIds(ids)
-        prefs.edit().putString(KEY_PLAYER_COVER_CARDS, encoded).apply()
-        _playerCoverCardIds.value = parseCoverCardIds(encoded)
+    fun setPlayerCoverFilter(filter: CoverFilter) {
+        prefs.edit()
+            .putString(KEY_PLAYER_COVER_CHARS, encodeIdSet(filter.characterIds))
+            .putString(KEY_PLAYER_COVER_RARITIES, encodeRarityKeys(filter.rarityKeys))
+            .putString(KEY_PLAYER_COVER_VARIANT, filter.variant.name)
+            .apply()
+        _playerCoverFilter.value = filter
+    }
+
+    /** 封面比例（默认方形 —— 用户实测 16:9 在播放器里显得空）。 */
+    private val _playerCoverAspect = MutableStateFlow(
+        enumOrDefault(prefs.getString(KEY_PLAYER_COVER_ASPECT, null), CoverAspect.SQUARE),
+    )
+    val playerCoverAspect: StateFlow<CoverAspect> = _playerCoverAspect.asStateFlow()
+
+    fun setPlayerCoverAspect(aspect: CoverAspect) {
+        prefs.edit().putString(KEY_PLAYER_COVER_ASPECT, aspect.name).apply()
+        _playerCoverAspect.value = aspect
     }
 
     fun setThemeMode(mode: ThemeMode) {
@@ -293,9 +320,14 @@ class AppSettings(context: Context) {
         const val KEY_VOCAL_MODE = "vocal_mode"
         const val KEY_SCORE_METRIC = "score_metric"
         const val KEY_PLAYER_COVER_MODE = "player_cover_mode"
-        const val KEY_PLAYER_COVER_CARDS = "player_cover_cards"
+        const val KEY_PLAYER_COVER_CHARS = "player_cover_chars"
+        const val KEY_PLAYER_COVER_RARITIES = "player_cover_rarities"
+        const val KEY_PLAYER_COVER_VARIANT = "player_cover_variant"
+        const val KEY_PLAYER_COVER_ASPECT = "player_cover_aspect"
         const val KEY_PREFERRED_VOCALS = "preferred_vocals"
         const val KEY_PLAYER_SERVER = "player_server"
         const val KEY_PLAYER_GAME_ID = "player_game_id"
     }
 }
+
+

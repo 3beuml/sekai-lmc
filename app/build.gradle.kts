@@ -34,8 +34,8 @@ android {
         applicationId = "com.pjsk.toolbox"
         minSdk = 26
         targetSdk = 36
-        versionCode = 40
-        versionName = "0.1.39"
+        versionCode = 41
+        versionName = "0.1.40"
     }
 
     signingConfigs {
@@ -173,6 +173,7 @@ dependencies {
     // 通知栏 / 锁屏 / 蓝牙控制（MediaSessionService）
     implementation(libs.androidx.media3.session)
 }
+
 
 
 

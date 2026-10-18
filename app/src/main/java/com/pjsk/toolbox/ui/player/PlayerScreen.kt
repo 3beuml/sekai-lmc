@@ -75,8 +75,15 @@ import androidx.compose.ui.unit.sp
 import com.pjsk.toolbox.PjskApp
 import com.pjsk.toolbox.data.card.Card
 import com.pjsk.toolbox.data.card.CardArtPlan
+import androidx.compose.ui.draw.blur
+import com.pjsk.toolbox.data.player.CoverAspect
+import com.pjsk.toolbox.data.player.CoverCandidate
+import com.pjsk.toolbox.data.player.CoverPick
+import com.pjsk.toolbox.data.player.expandCoverVariants
+import com.pjsk.toolbox.data.player.matchesCoverFilter
+import com.pjsk.toolbox.data.player.pickCover
 import com.pjsk.toolbox.data.player.PlayerCoverMode
-import com.pjsk.toolbox.data.player.pickCoverCardId
+import com.pjsk.toolbox.data.player.pickCover
 import com.pjsk.toolbox.data.music.MusicDetail
 import com.pjsk.toolbox.data.music.MusicVocal
 import com.pjsk.toolbox.data.music.TIME_UNSET_MS
@@ -198,41 +205,53 @@ fun PlayerScreen(
     if (track == null) return
 
     // ── 封面来源：歌曲曲绘 / 自定义卡面（随机） ──
+    // ── 封面来源：歌曲曲绘 / 自定义卡面（按筛选条件随机） ──
     //
     // 规则（用户拍板）：
     //  - 随机**只在切歌时**重新抽，切版本不动（沿用"切版本不换色"那条规则）；
-    //  - 卡面集合里只有一张时就是它，不"随机"；
-    //  - 集合为空 / 选中的卡都不在卡表里了 → **回退曲绘**，不显示空白。
+    //  - 默认方形；16:9 是可选，且会配一层模糊铺底（否则上下空出一大块，很空）；
+    //  - 条件命中为空 / 卡表里找不到 → **回退曲绘**，不显示空白。
     val coverMode by container.appSettings.playerCoverMode.collectAsState()
-    val coverSelectedIds by container.appSettings.playerCoverCardIds.collectAsState()
+    val coverFilter by container.appSettings.playerCoverFilter.collectAsState()
+    val coverAspect by container.appSettings.playerCoverAspect.collectAsState()
     val allCards by remember { container.cardRepository.cards }.collectAsState(initial = emptyList())
-    val cardsById = remember(allCards) { allCards.associateBy { it.id } }
     val allCharacters by remember { container.cardRepository.characters }.collectAsState(initial = emptyList())
-    var coverCardId by remember { mutableStateOf<Int?>(null) }
+    val cardsById = remember(allCards) { allCards.associateBy { it.id } }
+    // 条件 → 候选（纯内存过滤，1400 张卡 <10ms；用 remember 避免每帧重算）
+    val coverCandidates = remember(allCards, coverFilter) {
+        allCards.mapNotNull { card ->
+            CoverCandidate(
+                id = card.id,
+                characterId = card.characterId,
+                rarityKey = card.rarityKey,
+                trainedAvailable = card.artPlan != CardArtPlan.NORMAL_ONLY,
+            ).takeIf { matchesCoverFilter(it, coverFilter) }
+        }
+    }
+    val coverPicks = remember(coverCandidates, coverFilter.variant) {
+        expandCoverVariants(coverCandidates, coverFilter.variant)
+    }
+    var coverPick by remember { mutableStateOf<CoverPick?>(null) }
     // 一个跨重组存活的 Random：每次新建 Random() 在同一毫秒可能拿到相同种子，
     // 表现是"随机"连着给出同一张。
     val coverRandom = remember { kotlin.random.Random(System.nanoTime()) }
-    LaunchedEffect(track.musicId, coverMode, coverSelectedIds) {
-        if (coverMode != PlayerCoverMode.CARD_ART) {
-            coverCardId = null
+    // ⚠️ key 里必须有 `coverPicks`（条件一变就重抽）。漏了它就会出现
+    // "改了筛选条件、封面却还是上一张" —— 和控分那里踩过的坑同一类。
+    LaunchedEffect(track.musicId, coverMode, coverPicks) {
+        if (coverMode != PlayerCoverMode.CARD_ART || coverPicks.isEmpty()) {
+            coverPick = null
             return@LaunchedEffect
         }
-        val valid = coverSelectedIds.filter { cardsById.containsKey(it) }
-        if (valid.isEmpty()) {
-            coverCardId = null
-            return@LaunchedEffect
-        }
-        coverCardId = pickCoverCardId(valid, previous = coverCardId, random = coverRandom)
+        coverPick = pickCover(coverPicks, previousCardId = coverPick?.cardId, random = coverRandom)
     }
-    // 卡面用「觉醒后优先」：有觉醒后就用觉醒后（更漂亮，这是装饰用途），
-    // 1★/2★/生日卡没有觉醒后（`NORMAL_ONLY`）才用未觉醒 —— 靠 CardArtPlan 判断，
-    // **不要靠 404 兜底**（那会让封面空一下再回退）。
-    val coverCard: Card? = coverCardId?.let { cardsById[it] }
-    val coverUrl: String = if (coverCard != null) {
+    val currentPick = coverPick
+    val coverCard: Card? = currentPick?.let { cardsById[it.cardId] }
+    val coverUrl: String = if (coverCard != null && currentPick != null) {
         AssetUrls.cardImage(
             region = region,
             assetbundleName = coverCard.assetbundleName,
-            trained = coverCard.artPlan != CardArtPlan.NORMAL_ONLY,
+            // 版本由**筛选条件**决定（觉醒前 / 觉醒后 / 都要），不再写死"觉醒后优先"
+            trained = currentPick.trained,
             size = AssetUrls.CardSize.LARGE,
         )
     } else {
@@ -240,7 +259,13 @@ fun PlayerScreen(
     }
     // 取色缓存的键**必须跟着封面走**：卡面模式下同一首歌每次可能显示不同卡，
     // 用 musicId 当 key 会出现"封面换了、颜色还是上一张的"。
-    val coverKey = coverCard?.let { "card-${it.id}" } ?: "song-${track.musicId}"
+    val coverKey = if (coverCard != null && currentPick != null) {
+        "card-${coverCard.id}-" + (if (currentPick.trained) "tr" else "nm")
+    } else {
+        "song-${track.musicId}"
+    }
+    // 16:9 只在"确实有卡面"时生效：曲绘本身就是方的，套 16:9 只会把它裁扁
+    val wideCover = coverAspect == CoverAspect.WIDE && coverCard != null
 
     // ── 封面取色（Step 3）──
     //
@@ -491,12 +516,41 @@ fun PlayerScreen(
                 .fillMaxWidth(),
         ) {
             val cardMode = coverCard != null
-            val coverWidth = if (cardMode) {
+            // 卡面模式下按设置选比例；曲绘永远是正方形（它本身就是方的）
+            val cardWide = cardMode && wideCover
+            val coverWidth = if (cardWide) {
                 minOf(340.dp, maxWidth, maxHeight * 16f / 9f)
             } else {
                 minOf(340.dp, maxHeight, maxWidth)
             }
-            val coverHeight = if (cardMode) coverWidth * 9f / 16f else coverWidth
+            val coverHeight = if (cardWide) coverWidth * 9f / 16f else coverWidth
+
+            // 16:9 时**同一张图模糊铺满这一整块**：否则 340×191 的横幅浮在 ~380dp 高的
+            // 区域里，上下各空 95dp，看起来就是"很空"（用户实测反馈）。
+            // 铺底顺便让封面取色的效果更明显 —— 整个上半屏都是封面色。
+            // ⚠️ Modifier.blur 要 API 31+；低版本它是空操作，所以**必须**再叠一层渐变遮罩，
+            //    否则低版本上会看到一张没模糊的图怼在后面。
+            if (cardWide) {
+                Box(modifier = Modifier.matchParentSize()) {
+                    RemoteImage(
+                        url = coverUrl,
+                        contentDescription = null,
+                        modifier = Modifier.matchParentSize().blur(56.dp),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.35f),
+                                        MaterialTheme.colorScheme.background.copy(alpha = 0.92f),
+                                    ),
+                                ),
+                            ),
+                    )
+                }
+            }
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -709,13 +763,15 @@ fun PlayerScreen(
     if (showCoverSheet) {
         PlayerCoverSheet(
             mode = coverMode,
-            selectedIds = coverSelectedIds,
+            aspect = coverAspect,
+            filter = coverFilter,
             cards = allCards,
             characters = allCharacters,
             nameLanguage = nameLanguage,
             region = region,
             onModeChange = { container.appSettings.setPlayerCoverMode(it) },
-            onSelectionChange = { container.appSettings.setPlayerCoverCardIds(it) },
+            onAspectChange = { container.appSettings.setPlayerCoverAspect(it) },
+            onFilterChange = { container.appSettings.setPlayerCoverFilter(it) },
             onDismiss = { showCoverSheet = false },
         )
     }

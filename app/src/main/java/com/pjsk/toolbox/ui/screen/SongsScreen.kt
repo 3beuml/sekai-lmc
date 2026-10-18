@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.ui.screen
+﻿package com.pjsk.toolbox.ui.screen
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -90,6 +90,9 @@ import com.pjsk.toolbox.data.player.toTrack
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.settings.NameLanguage
+import com.pjsk.toolbox.data.player.PlayerCoverMode
+import com.pjsk.toolbox.ui.player.PlayerCoverSheet
+import androidx.compose.material.icons.filled.Image
 import com.pjsk.toolbox.data.settings.VocalMode
 import com.pjsk.toolbox.ui.common.EmptyState
 import com.pjsk.toolbox.ui.common.FilterGroupTitle
@@ -155,6 +158,13 @@ fun SongsScreen(
     // 纯临时状态：搜索框展开、筛选弹层开合 —— 返回时不该自己弹出来
     var searchOpen by remember { mutableStateOf(false) }
     var showFilter by remember { mutableStateOf(false) }
+    // 播放器封面（顶栏入口 + 播放器里的入口共用同一个弹层）
+    var showCoverSheet by remember { mutableStateOf(false) }
+    val coverMode by container.appSettings.playerCoverMode.collectAsState()
+    val coverFilter by container.appSettings.playerCoverFilter.collectAsState()
+    val coverAspect by container.appSettings.playerCoverAspect.collectAsState()
+    val coverCards by remember { container.cardRepository.cards }.collectAsState(initial = emptyList())
+    val coverCharacters by remember { container.cardRepository.characters }.collectAsState(initial = emptyList())
 
     val visible = remember(musics, query) { filterSongs(musics, query) }
     val cards = remember(musics) { buildSongCategoryCards(musics) }
@@ -232,6 +242,23 @@ fun SongsScreen(
                             imageVector = Icons.Default.FilterList,
                             contentDescription = "筛选",
                             tint = if (query.activeCount > 0) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                    // 播放器封面（曲绘 / 自定义卡面）。
+                    //
+                    // 为什么放在这一栏而不是只藏在播放器里：它和右边的「原曲版/世界版」
+                    // 是同一类东西 —— **全局默认偏好**，改一次影响之后所有播放。
+                    // 放这里用户找得到；点开的是和播放器**同一个**弹层（不写两套）。
+                    // ⚠️ 必须是图标按钮：这一栏已经有 搜索/筛选 + 一个文字切换，再加文字会挤。
+                    IconButton(onClick = { showCoverSheet = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Image,
+                            contentDescription = "播放器封面",
+                            tint = if (coverMode == PlayerCoverMode.CARD_ART) {
                                 MaterialTheme.colorScheme.primary
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
@@ -358,6 +385,22 @@ fun SongsScreen(
                 }
             }
         }
+    }
+
+    if (showCoverSheet) {
+        PlayerCoverSheet(
+            mode = coverMode,
+            aspect = coverAspect,
+            filter = coverFilter,
+            cards = coverCards,
+            characters = coverCharacters,
+            nameLanguage = nameLanguage,
+            region = region,
+            onModeChange = { container.appSettings.setPlayerCoverMode(it) },
+            onAspectChange = { container.appSettings.setPlayerCoverAspect(it) },
+            onFilterChange = { container.appSettings.setPlayerCoverFilter(it) },
+            onDismiss = { showCoverSheet = false },
+        )
     }
 
     if (showFilter) {

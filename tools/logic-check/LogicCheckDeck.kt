@@ -4,12 +4,18 @@ import com.pjsk.toolbox.data.deck.DeckTarget
 import com.pjsk.toolbox.data.deck.parseDeckRecommendResult
 import com.pjsk.toolbox.data.deck.buildRecommendParams
 import com.pjsk.toolbox.data.deck.restoreMusicMetasJson
+import com.pjsk.toolbox.data.player.CoverCandidate
+import com.pjsk.toolbox.data.player.CoverFilter
+import com.pjsk.toolbox.data.player.CoverPick
+import com.pjsk.toolbox.data.player.CoverVariant
+import com.pjsk.toolbox.data.player.encodeIdSet
+import com.pjsk.toolbox.data.player.expandCoverVariants
+import com.pjsk.toolbox.data.player.matchesCoverFilter
+import com.pjsk.toolbox.data.player.parseIdSet
+import com.pjsk.toolbox.data.player.parseRarityKeys
+import com.pjsk.toolbox.data.player.pickCover
 import com.pjsk.toolbox.data.remote.DataModule
 import com.pjsk.toolbox.data.remote.TableCatalog
-import com.pjsk.toolbox.data.player.MAX_COVER_CARDS
-import com.pjsk.toolbox.data.player.encodeCoverCardIds
-import com.pjsk.toolbox.data.player.parseCoverCardIds
-import com.pjsk.toolbox.data.player.pickCoverCardId
 import com.pjsk.toolbox.data.sync.RowProjectors
 import com.pjsk.toolbox.ui.common.intOrNull
 import kotlinx.serialization.json.JsonObject
@@ -266,50 +272,97 @@ checkEq(
     listOf(265, 260, null),
 )
 
-// ── 播放器封面：随机挑选 + 偏好编解码 ──
-// 随机的错法都是"看着不对"（连着两次同一张 / 挑到集合外的 id / 空集合崩），
-// 所以用固定种子的 Random 断言行为，而不是断言"某个随机结果"。
-val coverPool = listOf(101, 102, 103)
-val seqRandom = kotlin.random.Random(42)
-var previous: Int? = null
-var repeats = 0
-val picked = mutableListOf<Int>()
-repeat(50) {
-    val next = pickCoverCardId(coverPool, previous, seqRandom)
-    check("随机结果不能为 null（集合非空）", next != null)
-    if (next == previous) repeats++
-    next?.let { picked += it }
-    previous = next
+// ── 播放器封面：条件筛选 + 变体展开 + 随机挑选 ──
+// 这一层的错法全是"看着不对"（条件筛错 / ★1 莫名消失 / 连着两次同一张 / 空集合崩），
+// 所以用固定构造的候选集和固定种子的 Random 断言**行为**，而不是断言某个随机结果。
+val coverCandidates = listOf(
+    CoverCandidate(id = 1, characterId = 10, rarityKey = "rarity_4", trainedAvailable = true),
+    CoverCandidate(id = 2, characterId = 10, rarityKey = "rarity_3", trainedAvailable = true),
+    CoverCandidate(id = 3, characterId = 10, rarityKey = "rarity_birthday", trainedAvailable = false),
+    CoverCandidate(id = 4, characterId = 11, rarityKey = "rarity_4", trainedAvailable = true),
+    CoverCandidate(id = 5, characterId = 11, rarityKey = "rarity_1", trainedAvailable = false),
+)
+val coverIdsOf = { filter: CoverFilter ->
+    coverCandidates.filter { matchesCoverFilter(it, filter) }.map { it.id }
 }
-check("★ 连续 50 次随机**从不**与上一次相同", repeats == 0, "重复 $repeats 次")
-check("★ 挑出来的 id 一定在集合内", picked.all { it in coverPool })
-check("随机确实覆盖到多张（不是永远给同一张）", picked.toSet().size >= 2)
 checkEq(
-    "★ 单卡集合永远是它自己（不做随机）",
-    (1..20).map { pickCoverCardId(listOf(7), previous = 7, random = seqRandom) }.distinct(),
-    listOf(7),
-)
-checkEq("空集合返回 null（调用方回退曲绘）", pickCoverCardId(emptyList(), previous = 1, random = seqRandom), null)
-checkEq(
-    "上一张不在集合里时也不崩（照常挑）",
-    pickCoverCardId(listOf(1, 2), previous = 999, random = kotlin.random.Random(1)) in listOf(1, 2),
-    true,
+    "空条件 = 不限（全部命中）",
+    coverIdsOf(CoverFilter()),
+    listOf(1, 2, 3, 4, 5),
 )
 checkEq(
-    "★ 偏好编解码往返一致",
-    parseCoverCardIds(encodeCoverCardIds(listOf(11, 22, 33))),
-    listOf(11, 22, 33),
+    "★ 按角色筛",
+    coverIdsOf(CoverFilter(characterIds = setOf(10))),
+    listOf(1, 2, 3),
 )
-checkEq("脏数据被丢掉（非数字/0/负数）", parseCoverCardIds("11, abc, 0, -5, 22"), listOf(11, 22))
-checkEq("重复 id 去重", parseCoverCardIds("11,11,22"), listOf(11, 22))
-checkEq("空串 / null 解析成空列表", listOf(parseCoverCardIds(""), parseCoverCardIds(null)), listOf(emptyList(), emptyList()))
 checkEq(
-    "★ 超量被截断到上限（不是静默全存）",
-    parseCoverCardIds((1..500).joinToString(",")).size,
-    MAX_COVER_CARDS,
+    "★ 按星级筛（多选）",
+    coverIdsOf(CoverFilter(rarityKeys = setOf("rarity_4", "rarity_1"))),
+    listOf(1, 4, 5),
 )
-checkEq("编码也守上限", encodeCoverCardIds((1..500).toList()).split(',').size, MAX_COVER_CARDS)
+checkEq(
+    "★ 角色 × 星级 两个维度是**与**关系",
+    coverIdsOf(CoverFilter(characterIds = setOf(10), rarityKeys = setOf("rarity_4"))),
+    listOf(1),
+)
 
+// 变体展开：★1/★2/生日卡没有觉醒后，选「只要觉醒后」必须把它们排除（不是显示 404）
+checkEq(
+    "★ 只要觉醒前 → 每张一条",
+    expandCoverVariants(coverCandidates, CoverVariant.NORMAL).map { it.cardId },
+    listOf(1, 2, 3, 4, 5),
+)
+checkEq(
+    "★ 只要觉醒后 → 无觉醒后卡面的卡被排除",
+    expandCoverVariants(coverCandidates, CoverVariant.TRAINED).map { it.cardId },
+    listOf(1, 2, 4),
+)
+checkEq(
+    "★ 都要 → 有觉醒后的卡各两条、没有的一条",
+    expandCoverVariants(coverCandidates, CoverVariant.BOTH).size,
+    8,
+)
+check(
+    "★ 都要模式下 trained 标记正确（3 号生日卡只有未觉醒）",
+    expandCoverVariants(coverCandidates, CoverVariant.BOTH)
+        .filter { it.cardId == 3 }
+        .map { it.trained } == listOf(false),
+)
+
+// 随机挑选：不连续重复同一张卡（一卡两版算同一张）
+val coverPicks = expandCoverVariants(coverCandidates, CoverVariant.BOTH)
+val coverRng = kotlin.random.Random(7)
+var lastCoverId: Int? = null
+var coverRepeats = 0
+val pickedCovers = mutableListOf<CoverPick>()
+repeat(60) {
+    val next = pickCover(coverPicks, lastCoverId, coverRng)
+    check("随机不能返回 null（集合非空）", next != null)
+    if (next?.cardId == lastCoverId) coverRepeats++
+    next?.let { pickedCovers += it }
+    lastCoverId = next?.cardId
+}
+check("★ 连续 60 次不会与上一次同卡（同卡不同版本也算同卡）", coverRepeats == 0, "重复 $coverRepeats 次")
+check("挑出来的卡必在候选集内", pickedCovers.all { it.cardId in listOf(1, 2, 3, 4, 5) })
+check("随机确实覆盖多张", pickedCovers.map { it.cardId }.toSet().size >= 2)
+checkEq("单条可选时永远是它", pickCover(listOf(CoverPick(9, false)), previousCardId = 9, random = coverRng)?.cardId, 9)
+checkEq("空集合返回 null（调用方回退曲绘）", pickCover(emptyList(), null, coverRng), null)
+checkEq(
+    "★ 偏好编解码：角色 id 集合往返一致",
+    parseIdSet(encodeIdSet(setOf(3, 1, 2))),
+    setOf(1, 2, 3),
+)
+checkEq("脏 id 被丢掉", parseIdSet("1, x, 0, -2, 3"), setOf(1, 3))
+checkEq(
+    "★ 稀有度只保留已知 key（未知 key 会让命中数变成 0，比静默保留更难查）",
+    parseRarityKeys("rarity_4, rarity_9, junk, rarity_birthday"),
+    setOf("rarity_4", "rarity_birthday"),
+)
+checkEq("空串解析成空集合", listOf(parseIdSet(""), parseRarityKeys(null)), listOf(emptySet<Int>(), emptySet<String>()))
+check("未收窄条件时 isNarrowed=false（等于全卡表随机，界面该提示）", !CoverFilter().isNarrowed)
+check("选了任一维度就算收窄", CoverFilter(rarityKeys = setOf("rarity_4")).isNarrowed)
+
+// ── musicMetas：上游 33 字段 → 引擎要的 12 个 ──
 // ── musicMetas：上游 33 字段 → 引擎要的 12 个 ──
 val metaRaw = """
     {"music_id":1,"difficulty":"expert","music_time":123.2,"event_rate":114,
@@ -419,3 +472,4 @@ check(
 )
 check("musicMetas 有裁剪器（否则 5.4 MB 的原始表会整张进 APK）", RowProjectors.forFile("musicMetas.json") != null)
 }
+
