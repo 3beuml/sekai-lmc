@@ -44,7 +44,7 @@ private val PARAM_TYPES = listOf("param1", "param2", "param3")
  * 但引擎**只用** `cardParameters` 的数值 + 卡片上那几个短字段（稀有度/属性/角色/技能 id/支援团），
  * 这些裁剪器都留着，所以还原是完备的。
  *
- * 特训加成：原始表里叫 `specialTrainingPower1/2/3BonusFixed`，我们存在 `trainBonus` 数组里。
+ * 特训加成：原始表里叫 `specialTrainingPower1/2/3BonusFixed`，我们存在 `trainBonus` 数组里。`n *`n * ⚠️ `cardParameters` 的每一项除了三个数值字段，**还必须带 `id` 和 `cardId`**：`n * 参考实现 Moesekai 的 `transformCards` 产出的是 `{id, cardId, cardLevel, cardParameterType, power}`。`n * 少了 `cardId`，参数可能挂不到正确的卡上 —— 表现为卡能被解析、但语义被打乱`n * （真机实测：`trained:false` 却 `level:60`，且搜索只访问了 17 个节点）。
  */
 fun restoreCardsJson(croppedRows: List<String>): String {
     val sb = StringBuilder(11 * 1024 * 1024)
@@ -81,7 +81,9 @@ fun restoreCardsJson(croppedRows: List<String>): String {
                 val power = (element as? JsonPrimitive)?.content?.toIntOrNull() ?: return@forEachIndexed
                 if (!firstParam) sb.append(',')
                 firstParam = false
-                sb.append("{\"cardParameterType\":\"").append(PARAM_TYPES[index])
+                sb.append("{\"id\":").append(id * 100000L + index * 1000L + (levelIndex + 1))
+                    .append(",\"cardId\":").append(id)
+                    .append(",\"cardParameterType\":\"").append(PARAM_TYPES[index])
                     .append("\",\"cardLevel\":").append(levelIndex + 1)
                     .append(",\"power\":").append(power).append('}')
             }
@@ -304,4 +306,6 @@ internal fun quote(text: String): String {
     sb.append('"')
     return sb.toString()
 }
+
+
 
