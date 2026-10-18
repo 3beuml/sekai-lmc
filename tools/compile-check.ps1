@@ -107,6 +107,25 @@ if (Test-Path $gradleCpFile) {
         if (-not ($items | Where-Object { $_ -match 'platforms.*android\.jar$' })) {
             $items = @($AndroidJar) + $items
         }
+        # ── AAPT 生成的 R 类 ─────────────────────────────────────────────
+        # ⚠️ 2026-10-16 补：`MainActivity` 里开始用 `R.mipmap.*` / `R.string.*` 之后，
+        # 纯 kotlinc 会报 `unresolved reference 'R'` —— 因为 Gradle 导出的
+        # debugCompileClasspath 里**不含 AAPT 生成的 R.jar**（那个类不在依赖里，
+        # 是构建产物）。结果就是两个自检全红，而 Gradle 打包却是正常的。
+        # 这里手工把 `app/build/intermediates/**/R.jar` 补进 classpath。
+        # 前提：至少用 Gradle 成功构建过一次（生成了 R.jar）；没有就给出提示。
+        if (-not ($items | Where-Object { $_ -match 'R\.jar$' })) {
+            $rJars = @(Get-ChildItem (Join-Path $proj 'app\build\intermediates') -Recurse -Filter 'R.jar' -ErrorAction SilentlyContinue |
+                       Sort-Object LastWriteTime -Descending |
+                       Select-Object -First 1)
+            if ($rJars.Count -gt 0) {
+                $items = $items + $rJars[0].FullName
+                Write-Host "R.jar          : $($rJars[0].FullName)" -ForegroundColor DarkGray
+            } else {
+                Write-Host '⚠️ 找不到 app\build\intermediates\**\R.jar —— 源码里引用了 AAPT 生成的 R，' -ForegroundColor Yellow
+                Write-Host '   纯 kotlinc 会因此报 unresolved reference ''R''。先用 Gradle 构建一次生成它。' -ForegroundColor Yellow
+            }
+        }
         $classpath = $items -join ';'
         Write-Host "classpath      : Gradle 导出，$($items.Count) 项 / $($classpath.Length) 字符"
     }

@@ -48,11 +48,14 @@ fun SettingsScreen(
     onOpenSync: () -> Unit,
     onOpenTables: () -> Unit,
     onOpenAbout: () -> Unit,
+    onOpenMyPlayer: () -> Unit,
+    onOpenBindAccount: () -> Unit,
 ) {
     val context = LocalContext.current
     val settings = (context.applicationContext as PjskApp).container.appSettings
     val themeMode by settings.themeMode.collectAsState()
     val nameLanguage by settings.nameLanguage.collectAsState()
+    val playerAccount by settings.playerAccount.collectAsState()
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("更多") }) },
@@ -64,6 +67,35 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp),
         ) {
+            // ── 我的（2026-10-16 新增）──
+            //
+            // 放最上面：它是唯一"和用户自己有关"的入口，比外观/数据同步更需要被看到。
+            // 未绑定时只有一行「绑定游戏账号」，不打扰不想用这个功能的人。
+            SectionTitle("我的")
+            val account = playerAccount
+            if (account == null) {
+                NavRow(
+                    title = "绑定游戏账号",
+                    description = "填你的游戏 UID，读你自己上传到 Haruki 工具箱的数据",
+                    onClick = onOpenBindAccount,
+                )
+            } else {
+                NavRow(
+                    title = "我的数据",
+                    description = "${
+                        when (account.server) {
+                            "jp" -> "日服"
+                            "cn" -> "简中服"
+                            "tw" -> "港澳台服"
+                            "kr" -> "韩服"
+                            "en" -> "国际服"
+                            else -> account.server
+                        }
+                    } · 卡牌 / 成绩 / 资源",
+                    onClick = onOpenMyPlayer,
+                )
+            }
+
             SectionTitle("外观")
             Column(modifier = Modifier.selectableGroup()) {
                 ThemeMode.entries.forEach { mode ->

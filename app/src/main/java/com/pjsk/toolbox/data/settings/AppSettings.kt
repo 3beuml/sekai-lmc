@@ -2,6 +2,7 @@ package com.pjsk.toolbox.data.settings
 
 import android.content.Context
 import com.pjsk.toolbox.data.player.PlayMode
+import com.pjsk.toolbox.data.profile.PlayerAccount
 import com.pjsk.toolbox.util.decodeFavoriteSongs
 import com.pjsk.toolbox.util.decodePreferredVocals
 import com.pjsk.toolbox.util.encodeFavoriteSongs
@@ -176,6 +177,37 @@ class AppSettings(context: Context) {
     private fun readPreferredVocals(): Map<Int, Int> =
         decodePreferredVocals(prefs.getStringSet(KEY_PREFERRED_VOCALS, emptySet()).orEmpty())
 
+    // ─────────────────────────────────────────────────────────────
+    // 绑定的游戏账号（「我的」功能的入口状态）
+    //
+    // 只存两个字符串：区服 id + 游戏 UID。**没有任何凭据**——
+    // 读取走的是 Haruki 工具箱的公开只读接口，靠的就是 (区服, UID) 这一对。
+    // 所以解绑 = 删这两个键 + 删本地快照文件，不需要任何"注销"逻辑。
+    // ─────────────────────────────────────────────────────────────
+
+    private val _playerAccount = MutableStateFlow(readPlayerAccount())
+    val playerAccount: StateFlow<PlayerAccount?> = _playerAccount.asStateFlow()
+
+    /** 绑定 / 解绑（传 null）。 */
+    fun setPlayerAccount(account: PlayerAccount?) {
+        val editor = prefs.edit()
+        if (account == null) {
+            editor.remove(KEY_PLAYER_SERVER).remove(KEY_PLAYER_GAME_ID)
+        } else {
+            editor.putString(KEY_PLAYER_SERVER, account.server)
+                .putString(KEY_PLAYER_GAME_ID, account.gameId)
+        }
+        editor.apply()
+        _playerAccount.value = account
+    }
+
+    private fun readPlayerAccount(): PlayerAccount? {
+        val server = prefs.getString(KEY_PLAYER_SERVER, null) ?: return null
+        val gameId = prefs.getString(KEY_PLAYER_GAME_ID, null) ?: return null
+        if (server.isBlank() || gameId.isBlank()) return null
+        return PlayerAccount(server = server, gameId = gameId)
+    }
+
     /**
      * 把存下来的字符串还原成枚举。
      *
@@ -192,5 +224,7 @@ class AppSettings(context: Context) {
         const val KEY_PLAY_MODE = "play_mode"
         const val KEY_VOCAL_MODE = "vocal_mode"
         const val KEY_PREFERRED_VOCALS = "preferred_vocals"
+        const val KEY_PLAYER_SERVER = "player_server"
+        const val KEY_PLAYER_GAME_ID = "player_game_id"
     }
 }

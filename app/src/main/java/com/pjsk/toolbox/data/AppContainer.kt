@@ -9,6 +9,7 @@ import com.pjsk.toolbox.data.music.MusicRepository
 import com.pjsk.toolbox.data.settings.AppSettings
 import com.pjsk.toolbox.data.player.MusicPlayer
 import com.pjsk.toolbox.data.player.MusicPlayerFactory
+import com.pjsk.toolbox.data.profile.PlayerRepository
 import com.pjsk.toolbox.data.remote.MasterRepository
 import com.pjsk.toolbox.data.remote.MirrorFallbackInterceptor
 import com.pjsk.toolbox.data.sync.BundledPack
@@ -136,6 +137,17 @@ class AppContainer(private val context: Context) {
      */
     val storyRepository: StoryRepository by lazy {
         StoryRepository(database.masterDao(), httpClient)
+    }
+
+    /**
+     * 「我的」：玩家账号数据（持有卡 / 成绩 / 材料）。
+     *
+     * ⚠️ 它**和 master data 的同步完全无关**：数据来自 Haruki 工具箱的公开只读接口
+     * （玩家自己上传的快照），只按 (区服, UID) 读，没有任何凭据。
+     * 所以它不用 [masterDataDir]，而是自己管 `filesDir/player/` 下的快照文件。
+     */
+    val playerRepository: PlayerRepository by lazy {
+        PlayerRepository(appContext, httpClient)
     }
 
     /** 内置数据快照（打包在 APK 的 assets 里）。 */

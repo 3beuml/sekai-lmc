@@ -1,4 +1,4 @@
-import com.pjsk.toolbox.data.card.CardArtPlan
+﻿import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
 import com.pjsk.toolbox.data.card.CardQuery
 import com.pjsk.toolbox.data.card.CardSort
@@ -126,6 +126,14 @@ import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.DataModule
 import com.pjsk.toolbox.data.remote.MasterRepository
 import com.pjsk.toolbox.data.remote.ServerRegion
+import com.pjsk.toolbox.data.profile.PlayerAccount
+import com.pjsk.toolbox.data.profile.cardStats
+import com.pjsk.toolbox.data.profile.difficultyLabel
+import com.pjsk.toolbox.data.profile.isValidGameId
+import com.pjsk.toolbox.data.profile.materialStats
+import com.pjsk.toolbox.data.profile.musicStats
+import com.pjsk.toolbox.data.profile.normalizeGameId
+import com.pjsk.toolbox.data.profile.parseSnapshot
 import com.pjsk.toolbox.data.remote.TableCatalog
 import com.pjsk.toolbox.data.story.StoryAssetKind
 import com.pjsk.toolbox.data.sync.DatapackImportOrder
@@ -2588,6 +2596,84 @@ fun main(args: Array<String>) {
             )
         }
     }
+
+    // ─────────────────────────────────────────────────────────
+    section("22. 我的账号：UID 校验 / 快照解析 / 成绩与材料统计（§15）")
+
+    // ── UID 校验：规则抄自社区前端 `/^[1-9]\d{0,19}$/` ──
+    check("真实 UID（18 位）合法", isValidGameId("123456789012345678"))
+    check("19 位也合法", isValidGameId("1234567890123456789"))
+    check("首位是 0 不合法（UID 不会以 0 开头）", !isValidGameId("0123456789012345678"))
+    check("超过 20 位不合法", !isValidGameId("123456789012345678901"))
+    check("空串不合法", !isValidGameId(""))
+    check("带空格/连字符能被 normalize 掉", isValidGameId("  1234 5678 9012-345678  "))
+    checkEq("normalize 去掉空格与连字符", normalizeGameId(" 12-34 56 "), "123456")
+    check("引继码那种带字母的串不合法（也绝不该填到 UID 里）", !isValidGameId("Jntu114514e"))
+
+    // ── 快照解析：用一份「字段与真实响应同形」的最小夹具 ──
+    val account = PlayerAccount(server = "jp", gameId = "123456789012345678")
+    val fixture = """
+        {
+          "upload_time": 1792153847,
+          "userGamedata": { "name": "tester", "rank": 128, "coin": 1234567, "totalExp": 987654321 },
+          "userCards": [
+            { "cardId": 140, "level": 60, "masterRank": 5, "skillLevel": 4,
+              "specialTrainingStatus": "done", "episodes": { "1": "read", "2": "unread" } },
+            { "cardId": 141, "level": 50, "masterRank": 0, "skillLevel": 2,
+              "specialTrainingStatus": "not_done", "episodes": { "1": "unread" } },
+            { "level": 1 }
+          ],
+          "userMusicResults": [
+            { "musicId": 1, "musicDifficultyType": "master", "fullComboFlg": true,  "fullPerfectFlg": true,  "highScore": 1500000 },
+            { "musicId": 1, "musicDifficultyType": "master", "fullComboFlg": true,  "fullPerfectFlg": false, "highScore": 1400000 },
+            { "musicId": 2, "musicDifficultyType": "expert", "fullComboFlg": false, "fullPerfectFlg": false, "highScore": 900000 }
+          ],
+          "userMaterials": [
+            { "materialId": 1, "quantity": 30 },
+            { "materialId": 2, "quantity": 0 }
+          ]
+        }
+    """.trimIndent()
+
+    val snap = parseSnapshot(fixture, account)
+    check("能解析出快照", snap != null)
+    if (snap != null) {
+        checkEq("upload_time 按秒保留", snap.uploadTime, 1792153847L)
+        checkEq("昵称", snap.name, "tester")
+        checkEq("等级", snap.rank, 128)
+        checkEq("金币", snap.coin, 1234567L)
+
+        // 缺 cardId 的那条要被丢掉，不能让整份解析失败
+        checkEq("坏数据只丢那一条（3 条 → 2 条）", snap.cards.size, 2)
+        check("特训状态 done 被识别", snap.cards.first { it.cardId == 140 }.trained)
+        check("特训状态 not_done 不算特训", !snap.cards.first { it.cardId == 141 }.trained)
+        checkEq("已读篇数只数 read、不数 unread", snap.cards.first { it.cardId == 140 }.episodesRead, 1)
+
+        val cs = cardStats(snap.cards)
+        checkEq("卡牌统计：持有数", cs.owned, 2)
+        checkEq("卡牌统计：已特训", cs.trained, 1)
+        checkEq("卡牌统计：最高技能等级", cs.maxSkillLevel, 4)
+        checkEq("卡牌统计：做过突破的（masterRank≥1）", cs.anyMasterRank, 1)
+
+        // 同一首歌同一难度给了两条 → 合并成一条、取最好，不能把计数算重
+        val ms = musicStats(snap.musicResults)
+        checkEq("难度分组数（master / expert）", ms.size, 2)
+        val master = ms.first { it.difficulty == "master" }
+        checkEq("master 合并后只剩 1 首", master.played, 1)
+        checkEq("master FC", master.fullCombo, 1)
+        checkEq("master AP（两条里任一 AP 即算）", master.allPerfect, 1)
+        checkEq("难度按 easy→append 排序，master 在 expert 之后", ms.map { it.difficulty }, listOf("expert", "master"))
+        checkEq("难度展示名", difficultyLabel("append"), "Append")
+
+        val matStats = materialStats(snap.materials)
+        checkEq("材料种类", matStats.kinds, 2)
+        checkEq("持有中的材料种类（数量 > 0）", matStats.nonZeroKinds, 1)
+        checkEq("材料数量合计", matStats.totalQuantity, 30L)
+    }
+
+    // 顶层没有 userGamedata → 不是一份可用快照，返回 null 而不是抛异常
+    check("没有 userGamedata 时返回 null 而不是崩", parseSnapshot("""{"upload_time":1}""", account) == null)
+    check("完全不是 JSON 时返回 null", parseSnapshot("not json", account) == null)
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))

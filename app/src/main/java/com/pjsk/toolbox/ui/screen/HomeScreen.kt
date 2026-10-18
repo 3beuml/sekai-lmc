@@ -341,6 +341,21 @@ fun HomeScreen(
                             url = "https://tool.sonolus.reikohaku.fun/server-list",
                         ),
                     )
+                    // 2026-10-16 新增第 5 格：绑定自己账号的入口。
+                    // ⚠️ 它是**外链**（去第三方网站注册与上传），不是本 App 的功能 ——
+                    // 所以 note 里必须写清"第三方网站"，也不能让用户以为本 App 会拿他的账号。
+                    // 加这一格会把原来的「两行两列」变成两行 + 一行，是有意的取舍：
+                    // 没有 Haruki 那一步，App 里填多少 UID 都读不到数据。
+                    // 奇数个时让它**占满整行**（不加右格），避免右边留一块空白。
+                    LinkTile(
+                        spec = LinkSpec(
+                            title = "绑定游戏账号",
+                            note = "第三方网站 Haruki 工具箱 · 注册并上传后，" +
+                                "可在「更多 → 我的」查看自己的卡牌与成绩",
+                            url = "https://haruki.seiunx.com/",
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
 

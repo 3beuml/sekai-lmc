@@ -35,6 +35,7 @@ import androidx.navigation.navArgument
 import com.pjsk.toolbox.PjskApp
 import com.pjsk.toolbox.data.story.StoryType
 import com.pjsk.toolbox.ui.screen.AboutScreen
+import com.pjsk.toolbox.ui.screen.BindAccountScreen
 import com.pjsk.toolbox.ui.screen.CardDetailScreen
 import com.pjsk.toolbox.ui.screen.CardEpisodeScreen
 import com.pjsk.toolbox.ui.screen.CardListScreen
@@ -44,6 +45,7 @@ import com.pjsk.toolbox.ui.screen.DetailScreen
 import com.pjsk.toolbox.ui.screen.GachaScreen
 import com.pjsk.toolbox.ui.screen.HomeScreen
 import com.pjsk.toolbox.ui.screen.LyricsScreen
+import com.pjsk.toolbox.ui.screen.MyPlayerScreen
 import com.pjsk.toolbox.ui.screen.SongsScreen
 import com.pjsk.toolbox.ui.screen.MasterListScreen
 import com.pjsk.toolbox.ui.screen.MusicDetailScreen
@@ -66,6 +68,16 @@ object Routes {
     const val ABOUT = "about"
     const val TABLES = "tables"
     const val SETTINGS = "settings"
+
+    /**
+     * 「我的」：玩家自己账号的数据（从「更多」进入）。
+     *
+     * 两个独立路由而不是一个带参数的页：
+     * 「绑定」是**动作**、可反复进入；「我的」是**查看**、绑定后才该有内容。
+     * 分开之后「我的」里点「去绑定」是正常导航，不需要一个"绑定中"的状态分支。
+     */
+    const val BIND_ACCOUNT = "my/bind"
+    const val MY_PLAYER = "my"
 
     const val ARG_TABLE = "table"
     const val ARG_ID = "id"
@@ -337,6 +349,29 @@ fun AppNav() {
                     onOpenSync = { navController.navigate(Routes.SYNC) },
                     onOpenTables = { navController.navigate(Routes.TABLES) },
                     onOpenAbout = { navController.navigate(Routes.ABOUT) },
+                    onOpenMyPlayer = { navController.navigate(Routes.MY_PLAYER) },
+                    onOpenBindAccount = { navController.navigate(Routes.BIND_ACCOUNT) },
+                )
+            }
+
+            composable(Routes.MY_PLAYER) {
+                MyPlayerScreen(
+                    onBack = { navController.popBackStack() },
+                    onUnbound = { navController.popBackStack() },
+                    onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
+                )
+            }
+
+            composable(Routes.BIND_ACCOUNT) {
+                BindAccountScreen(
+                    onBack = { navController.popBackStack() },
+                    // 绑定成功后直接落到「我的」看结果 —— 用户刚做完一个动作，
+                    // 最想知道的就是"成了吗、里面有什么"，不要让他再回上一页找入口。
+                    onBound = {
+                        navController.navigate(Routes.MY_PLAYER) {
+                            popUpTo(Routes.BIND_ACCOUNT) { inclusive = true }
+                        }
+                    },
                 )
             }
 
