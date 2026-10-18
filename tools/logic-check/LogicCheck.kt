@@ -1,4 +1,4 @@
-import com.pjsk.toolbox.data.card.CardArtPlan
+﻿import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
 import com.pjsk.toolbox.data.card.CardQuery
 import com.pjsk.toolbox.data.card.CardSort
@@ -148,6 +148,18 @@ import com.pjsk.toolbox.data.profile.difficultyCounts
 import com.pjsk.toolbox.data.profile.filterMySongs
 import com.pjsk.toolbox.data.profile.myMusicQueryFromSaveText
 import com.pjsk.toolbox.data.profile.statusCounts
+import com.pjsk.toolbox.data.card.CardEpisode
+import com.pjsk.toolbox.data.profile.OwnedAreaItem
+import com.pjsk.toolbox.data.profile.OwnedHonor
+import com.pjsk.toolbox.data.profile.areaItemLevelKey
+import com.pjsk.toolbox.data.profile.characterRankKey
+import com.pjsk.toolbox.data.profile.computeDeckPower
+import com.pjsk.toolbox.data.profile.currentDeckCardIds
+import com.pjsk.toolbox.data.profile.parseAreaItemLevelRows
+import com.pjsk.toolbox.data.profile.parseCharacterRankRates
+import com.pjsk.toolbox.data.profile.parseEpisodeStatus
+import com.pjsk.toolbox.data.profile.parseHonorBonuses
+import com.pjsk.toolbox.data.profile.resolveReadEpisodes
 import com.pjsk.toolbox.data.profile.songStatusByDifficulty
 import com.pjsk.toolbox.data.score.Best30Result
 import com.pjsk.toolbox.data.score.computeBest30
@@ -2554,7 +2566,7 @@ fun main(args: Array<String>) {
             val file = row.stringValue("file") ?: return@mapNotNull null
             Triple(file, row.intValue("rows") ?: 0, (row.stringValue("bytes")?.toLongOrNull() ?: 0L))
         }
-        check("清单里有 67 张表", entries.size == 67, "实际=${entries.size}")
+        check("清单里有 70 张表", entries.size == 70, "实际=${entries.size}")
 
         val sorted = entries.sortedWith(
             compareBy(
@@ -2579,7 +2591,7 @@ fun main(args: Array<String>) {
         val p2Bytes = p2.map { name -> entries.first { it.first == name }.third }
         check("P2 段按体积升序（小表先完成，进度条动得快）",
             p2Bytes.zipWithNext().all { (a, b) -> a <= b }, "体积序列前 8 项=${p2Bytes.take(8)}")
-        check("清单里 67 张表都排进去了", sorted.size == 67)
+        check("清单里 70 张表都排进去了", sorted.size == 70)
     }
 
     section("在线同步顺序：卡牌 / 歌曲在前，卡池垫底")
@@ -2720,6 +2732,13 @@ fun main(args: Array<String>) {
             check(
                 "从最初的行格式（1）升级会重导 gachas.json（pk 字段是这一版才有的）",
                 DatapackSchema.tablesToReimport(1).contains("gachas.json"),
+            )
+            check(
+                "★ 从 2 升到 3 会重导三张综合力表（areaItems / areaItemLevels / honors）",
+                DatapackSchema.tablesToReimport(2).containsAll(
+                    listOf("areaItems.json", "areaItemLevels.json", "honors.json"),
+                ),
+                "实际=${DatapackSchema.tablesToReimport(2).sorted()}",
             )
             check(
                 "重导名单里的表都在快照清单里（认错表名会变成永远导不进）",
@@ -3425,6 +3444,228 @@ fun main(args: Array<String>) {
     }
 
     // ─────────────────────────────────────────────────────────
+    section("27. 综合力：区域道具 / 角色等级 / 称号 的分项计算（批次 C）")
+    // ─────────────────────────────────────────────────────────
+    // 这一节防的都是「静默算错」：
+    //  - 区域道具的 targetGameCharacterId 缺省被当成 0 号角色（会让个别道具永远不生效）；
+    //  - 「整队同组/同属」的额外加成在混编队伍里也生效（数字偏大几百点）；
+    //  - 逐维 floor 的顺序被"优化"掉（末尾差几点，最难查）；
+    //  - 称号加成被当成百分比（差一个数量级）。
+    val areaRows = parseAreaItemLevelRows(
+        listOf(
+            // 单角色道具：志步(3) 的贝斯，2%/级
+            """{"id":3001,"areaItemId":3,"level":1,"targetUnit":"any","targetCardAttr":"any",
+               "targetGameCharacterId":3,"r":[2.0,2.0,2.0],"ar":[2.0,2.0,2.0]}""",
+            // 组合道具：Leo/need 0.5%/级，整队同组时 1%
+            """{"id":31001,"areaItemId":31,"level":1,"targetUnit":"light_sound","targetCardAttr":"any",
+               "r":[0.5,0.5,0.5],"ar":[1.0,1.0,1.0]}""",
+            // 属性道具：cool 0.5%/级，整队同色时 1%
+            """{"id":46001,"areaItemId":46,"level":1,"targetUnit":"any","targetCardAttr":"cool",
+               "r":[0.5,0.5,0.5],"ar":[1.0,1.0,1.0]}""",
+            // 全员道具：0.5%/级，无 AllMatch
+            """{"id":56001,"areaItemId":56,"level":1,"targetUnit":"any","targetCardAttr":"any",
+               "r":[0.5,0.5,0.5],"ar":[0.0,0.0,0.0]}""",
+            // multi_unit 是永远不匹配的特殊值
+            """{"id":57001,"areaItemId":57,"level":1,"targetUnit":"multi_unit","targetCardAttr":"any",
+               "r":[9.0,9.0,9.0],"ar":[9.0,9.0,9.0]}""",
+        ),
+    )
+    checkEq("区域道具表解析出行数", areaRows.size, 5)
+    checkEq("键 = areaItemId × 1000 + level", areaRows.containsKey(areaItemLevelKey(3, 1)), true)
+    checkEq(
+        "★ 缺 targetGameCharacterId 的行按「不限角色」处理（不是 0 号角色）",
+        areaRows[areaItemLevelKey(31, 1)]?.targetGameCharacterId,
+        0,
+    )
+    checkEq("加成率读成三项数组", areaRows[areaItemLevelKey(3, 1)]?.rates, listOf(2.0, 2.0, 2.0))
+
+    checkEq(
+        "称号表解析：只留 bonus>0 的等级",
+        parseHonorBonuses(
+            listOf(
+                """{"id":105,"name":"39！","levels":[{"level":1,"bonus":10},{"level":2,"bonus":0}]}""",
+                """{"id":1,"name":"一歌ファン","levels":[{"level":1,"bonus":0}]}""",
+            ),
+        ),
+        mapOf(105 to mapOf(1 to 10)),
+    )
+    checkEq(
+        "角色等级加成率解析",
+        parseCharacterRankRates(
+            listOf("""{"characterId":1,"characterRank":5,"power1BonusRate":1.0,"power2BonusRate":1.0,"power3BonusRate":1.0}"""),
+        )[characterRankKey(1, 5)],
+        listOf(1.0, 1.0, 1.0),
+    )
+
+    // ── 计算：用一张合成卡（基础三维各 1000，无特训/无突破/无剧情）──
+    fun deckCardOf(id: Int, characterId: Int, attr: CardAttr) = card.copy(
+        id = id,
+        characterId = characterId,
+        attr = attr,
+        rarityKey = "rarity_4",
+        hasTrained = true,
+        maxLevel = 60,
+        vocal = List(60) { 1000 },
+        dance = List(60) { 1000 },
+        visual = List(60) { 1000 },
+    )
+    val deckCardsMaster = listOf(
+        deckCardOf(1, 1, CardAttr.COOL),
+        deckCardOf(2, 2, CardAttr.COOL),
+        deckCardOf(3, 3, CardAttr.COOL),
+        deckCardOf(4, 4, CardAttr.COOL),
+        deckCardOf(5, 5, CardAttr.COOL),
+    ).associateBy { it.id }
+    val ownedDeck = (1..5).map { id ->
+        OwnedCard(cardId = id, level = 60, masterRank = 0, skillLevel = 1, trained = false, episodesRead = 0)
+    }
+    val unitOfLightsound = { c: com.pjsk.toolbox.data.card.Card -> if (c.id <= 5) listOf("light_sound") else emptyList<String>() }
+
+    // 整队同组 + 同色：单角色道具不匹配（角色的 id 各不相同）→ 只有 31 与 46 与 56 生效
+    val sameTeam = computeDeckPower(
+        deckCards = ownedDeck,
+        cards = deckCardsMaster,
+        episodesByCard = emptyMap(),
+        userCharacterRanks = emptyMap(),
+        characterRankRates = emptyMap(),
+        userAreaItems = listOf(
+            OwnedAreaItem(3, 1), OwnedAreaItem(31, 1), OwnedAreaItem(46, 1), OwnedAreaItem(56, 1),
+        ),
+        areaItemLevels = areaRows,
+        honorBonuses = emptyMap(),
+        userHonors = emptyList(),
+        cardUnits = unitOfLightsound,
+    )
+    check("整队同组时能算出来", sameTeam != null)
+    checkEq("★ 卡牌基础 = 5 张 × (1000+1000+1000)", sameTeam?.base, 15_000)
+    // 每张卡：31 → 1%（同组）→ 每维 floor(1000×0.01)=10 → 30；46 → 1%（同色）→ 30；56 → 0.5% → 每维 5 → 15
+    // 53 号道具（单角色 3）只对角色 3 生效 → 那一张额外 2% → 每维 20 → 60
+    checkEq(
+        "★ 区域道具：整队同组/同色时用 AllMatch 档，单角色道具只对那个人生效",
+        sameTeam?.areaItemBonus,
+        4 * (30 + 30 + 15) + (30 + 30 + 15 + 60),
+    )
+    checkEq("称号为 0", sameTeam?.honorBonus, 0)
+    checkEq("总数 = 四部分之和", sameTeam?.total, sameTeam?.let { it.base + it.areaItemBonus + it.characterBonus + it.honorBonus })
+    checkEq("诊断：参与计算的区域道具件数", sameTeam?.areaItemCount, 4)
+
+    // 混编（属性不一致 + 组合不一致）：AllMatch 不生效 → 31 用 0.5%、46 用 0.5%
+    val mixed = computeDeckPower(
+        deckCards = ownedDeck,
+        cards = deckCardsMaster,
+        episodesByCard = emptyMap(),
+        userCharacterRanks = emptyMap(),
+        characterRankRates = emptyMap(),
+        userAreaItems = listOf(OwnedAreaItem(31, 1), OwnedAreaItem(46, 1)),
+        areaItemLevels = areaRows,
+        honorBonuses = emptyMap(),
+        userHonors = emptyList(),
+        cardUnits = { emptyList() },
+    )
+    // 每张卡：31 → 0.5% → 每维 5 → 15；46 → 0.5% → 15
+    checkEq(
+        "★ 混编队伍拿不到「整队同组/同属」的额外加成（与参考实现的刻意差异）",
+        mixed?.areaItemBonus,
+        5 * (15 + 15),
+    )
+
+    // 称号：固定值直接相加
+    val withHonors = computeDeckPower(
+        deckCards = ownedDeck.take(1),
+        cards = deckCardsMaster,
+        episodesByCard = emptyMap(),
+        userCharacterRanks = emptyMap(),
+        characterRankRates = emptyMap(),
+        userAreaItems = emptyList(),
+        areaItemLevels = areaRows,
+        honorBonuses = mapOf(105 to mapOf(1 to 10), 106 to mapOf(1 to 10)),
+        userHonors = listOf(OwnedHonor(105, 1), OwnedHonor(106, 1), OwnedHonor(1, 1)),
+        cardUnits = unitOfLightsound,
+    )
+    checkEq("★ 称号加成是固定值直接相加（不是百分比）", withHonors?.honorBonus, 20)
+    checkEq("称号数诊断（查不到加成的称号不算）", withHonors?.honorCount, 2)
+
+    // 角色等级加成：1% 每维 → 每张卡每维 10 → 30
+    val withRanks = computeDeckPower(
+        deckCards = ownedDeck.take(2),
+        cards = deckCardsMaster,
+        episodesByCard = emptyMap(),
+        userCharacterRanks = mapOf(1 to 5, 2 to 5),
+        characterRankRates = mapOf(
+            characterRankKey(1, 5) to listOf(1.0, 1.0, 1.0),
+            characterRankKey(2, 5) to listOf(1.0, 1.0, 1.0),
+        ),
+        userAreaItems = emptyList(),
+        areaItemLevels = areaRows,
+        honorBonuses = emptyMap(),
+        userHonors = emptyList(),
+        cardUnits = unitOfLightsound,
+    )
+    checkEq("★ 角色等级加成：每张卡逐维 floor 后相加", withRanks?.characterBonus, 60)
+
+    checkEq("★ 编成为空时返回 null（界面整块不显示，而不是显示 0）", computeDeckPower(
+        deckCards = emptyList(),
+        cards = deckCardsMaster,
+        episodesByCard = emptyMap(),
+        userCharacterRanks = emptyMap(),
+        characterRankRates = emptyMap(),
+        userAreaItems = emptyList(),
+        areaItemLevels = areaRows,
+        honorBonuses = emptyMap(),
+        userHonors = emptyList(),
+    ), null)
+
+    // ── 已读剧情的两种口径 ──
+    val episodesFixture = listOf(
+        CardEpisode(id = 9001, cardId = 1, part = 1, title = null, scenarioId = null, releaseConditionId = null,
+            powerBonus = listOf(100, 100, 100), costs = emptyList(), rewardResourceBoxIds = emptyList()),
+        CardEpisode(id = 9002, cardId = 1, part = 2, title = null, scenarioId = null, releaseConditionId = null,
+            powerBonus = listOf(200, 200, 200), costs = emptyList(), rewardResourceBoxIds = emptyList()),
+    )
+    checkEq(
+        "★ episodes 的键当成 cardEpisodeId 时能对上",
+        resolveReadEpisodes(episodesFixture, OwnedCard(1, 60, 0, 1, false, 1, setOf(9001)))?.map { it.id },
+        listOf(9001),
+    )
+    checkEq(
+        "★ 键当成篇号时也能对上（上游形状未实测，两种都认）",
+        resolveReadEpisodes(episodesFixture, OwnedCard(1, 60, 0, 1, false, 1, setOf(2)))?.map { it.id },
+        listOf(9002),
+    )
+    checkEq(
+        "一个都对不上时宁可返回空（不编加成）",
+        resolveReadEpisodes(episodesFixture, OwnedCard(1, 60, 0, 1, false, 1, setOf(777)))?.size,
+        0,
+    )
+
+    // ── userCards[].episodes 的两种形状 ──
+    checkEq(
+        "episodes 是数组时按 scenarioStatus 判断",
+        parseEpisodeStatus(
+            json.parseToJsonElement(
+                """[{"cardEpisodeId":9001,"scenarioStatus":"already_read"},{"cardEpisodeId":9002,"scenarioStatus":"not_read"}]""",
+            ),
+        ).let { it.read to it.keys },
+        1 to setOf(9001),
+    )
+    checkEq(
+        "episodes 是对象时按键取值",
+        parseEpisodeStatus(json.parseToJsonElement("""{"1":"read","2":"unread"}""")).let { it.read to it.keys },
+        1 to setOf(1),
+    )
+    checkEq("episodes 缺失时是 0 篇", parseEpisodeStatus(null).read, 0)
+
+    checkEq(
+        "当前编成按 队长→副队长→member1..3 取卡 id，去重",
+        currentDeckCardIds(
+            json.parseToJsonElement(
+                """{"deckId":1,"leader":10,"subLeader":11,"member1":12,"member2":13,"member3":13}""",
+            ) as JsonObject,
+        ),
+        listOf(10, 11, 12, 13),
+    )
+
+    // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))
     if (failures == 0) {
         println("逻辑自检 PASS —— $checks 项全部通过")
@@ -3454,3 +3695,7 @@ private fun JsonObject.boolValue(key: String): Boolean? =
 private fun JsonObject.intList(key: String): List<Int> =
     (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content?.toDoubleOrNull()?.toInt() }
         ?: emptyList()
+
+
+
+

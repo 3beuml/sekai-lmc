@@ -34,6 +34,17 @@ internal fun JsonObject.longOrNull(key: String): Long? {
 
 internal fun JsonObject.intOrNull(key: String): Int? = longOrNull(key)?.toInt()
 
+/**
+ * 取小数：`2`、`0.5`、`"0.5"`、`0.4000000059604645` 都接受。
+ *
+ * 区域道具的 `powerBonusRate` 是**带 float32 误差的百分数**（`0.4000000059604645`），
+ * 所以不能走 `intOrNull`，也不能因为「有小数」就当脏数据丢掉。
+ */
+internal fun JsonObject.doubleOrNull(key: String): Double? {
+    val v = primitiveOrNull(key) ?: return null
+    return v.contentOrNullSafe()?.toDoubleOrNull()
+}
+
 /** 取布尔：真正的 `true` / `"true"` / `1` 都算 true。 */
 internal fun JsonObject.boolOrNull(key: String): Boolean? {
     val v = primitiveOrNull(key) ?: return null

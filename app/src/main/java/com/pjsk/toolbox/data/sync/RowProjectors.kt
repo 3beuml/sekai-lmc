@@ -33,6 +33,9 @@ object RowProjectors {
 
     const val CARDS_FILE = "cards.json"
     const val GACHAS_FILE = "gachas.json"
+    const val AREA_ITEMS_FILE = "areaItems.json"
+    const val AREA_ITEM_LEVELS_FILE = "areaItemLevels.json"
+    const val HONORS_FILE = "honors.json"
 
     /**
      * 该表要用哪个裁剪器。返回 `null` 表示**不裁剪**，直接存原始 JSON 文本
@@ -41,6 +44,9 @@ object RowProjectors {
     fun forFile(fileName: String): RowProjector? = when (fileName) {
         CARDS_FILE -> CARDS
         GACHAS_FILE -> GACHAS
+        AREA_ITEMS_FILE -> AREA_ITEMS
+        AREA_ITEM_LEVELS_FILE -> AREA_ITEM_LEVELS
+        HONORS_FILE -> HONORS
         else -> null
     }
 
@@ -213,4 +219,100 @@ object RowProjectors {
             put("p3", toJsonArray(PARAM_VISUAL))
         }
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // 综合力（区域道具 / 称号）—— 2026-10 批次 C
+    //
+    // 这三张表的原始体积合计 4.23 MB（`honors.json` 一张 3.69 MB），
+    // 而本 App 只需要其中很少的字段。裁剪口径与依据见 docs/research/pjsk-power-bonds-data-research.md §2.4。
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * 区域道具（56 行）。只留「id + 名字」—— `flavorText` / `spawnPoint` / `assetbundleName` 用不到。
+     *
+     * 12,568 B → 约 2.5 KB。名字是给「加成明细」用的（不然只能显示「道具 #31 +1.5%」）。
+     */
+    val AREA_ITEMS = RowProjector { obj ->
+        // 幂等：裁过的行只剩 id/name，没有 flavorText
+        if (obj["name"] is JsonPrimitive && obj["flavorText"] == null) return@RowProjector obj
+        val id = obj.intOrNull("id") ?: return@RowProjector null
+        buildJsonObject {
+            put("id", id)
+            obj.intOrNull("areaId")?.let { put("areaId", it) }
+            obj.stringOrNull("name")?.let { put("name", it) }
+        }
+    }
+
+    /**
+     * 区域道具等级（1,140 行 = 57 件 × 20 级）。原始 521,267 B，其中 `sentence`（带 `<color>` 的说明文本）
+     * 就占 128,243 B，而且我们从不显示它 —— 丢掉。
+     *
+     * ⚠️ **这张表没有 `id` 字段**（行由 `areaItemId` + `level` 唯一确定），
+     * 而 `master_rows` 的主键是 `(tableName, id)`。直接按 `areaItemId` 当主键会让同一件道具的
+     * 20 个等级互相覆盖（只剩最后一级），界面上表现为「所有道具都是 20 级」。
+     * 所以这里**自己造一个 id = areaItemId × 1000 + level**，保证唯一且可反解。
+     */
+    val AREA_ITEM_LEVELS = RowProjector { obj ->
+        // 幂等：已经有 id 说明裁过了
+        if (obj["id"] is JsonPrimitive) return@RowProjector obj
+        val itemId = obj.intOrNull("areaItemId") ?: return@RowProjector null
+        val level = obj.intOrNull("level") ?: return@RowProjector null
+        buildJsonObject {
+            put("id", itemId * 1000 + level)
+            put("areaItemId", itemId)
+            put("level", level)
+            obj.stringOrNull("targetUnit")?.let { put("targetUnit", it) }
+            obj.stringOrNull("targetCardAttr")?.let { put("targetCardAttr", it) }
+            // ⚠️ 这一项**缺省**表示「不限角色」，绝不能当成 0 号角色（560 行没有这个字段）
+            (obj.intOrNull("targetGameCharacterId") ?: 0).takeIf { it > 0 }?.let {
+                put("targetGameCharacterId", it)
+            }
+            put("r", rateArray(obj, "power1BonusRate", "power2BonusRate", "power3BonusRate"))
+            put("ar", rateArray(obj, "power1AllMatchBonusRate", "power2AllMatchBonusRate", "power3AllMatchBonusRate"))
+        }
+    }
+
+    /**
+     * 称号（8,801 行 / 3,694,822 B）。体积几乎全部来自每行最多 100 个 `levels`（每级还带一段说明文本）。
+     *
+     * 裁剪口径：**只保留 `bonus > 0` 的等级，并且丢掉所有等级都 0 的称号**。
+     * 依据：`bonus` 全文只有 `0` 与 `10` 两种取值，全表只有 34 个等级是 10（见研究文档 §2.3）。
+     * 3,694,822 B → 约 2.4 KB。
+     *
+     * ⚠️ 代价：查不到的行按「加成 0」处理（界面不会显示这些称号的名字）。
+     * 这正好是我们要的 —— 显示一个「+0」的称号没有意义。
+     */
+    val HONORS = RowProjector { obj ->
+        // 幂等：裁过的行 levels 里只有 {level,bonus}，没有 description
+        val id = obj.intOrNull("id") ?: return@RowProjector null
+        val positiveLevels = buildJsonArray {
+            obj.arrayOrNull("levels")?.forEach { element ->
+                val levelObj = element as? JsonObject ?: return@forEach
+                val bonus = levelObj.intOrNull("bonus") ?: 0
+                if (bonus <= 0) return@forEach
+                add(
+                    buildJsonObject {
+                        put("level", levelObj.intOrNull("level") ?: return@forEach)
+                        put("bonus", bonus)
+                    },
+                )
+            }
+        }
+        // 没有任何正加成 → 整行不需要（省掉 8,700 多行）
+        if (positiveLevels.isEmpty()) return@RowProjector null
+        buildJsonObject {
+            put("id", id)
+            obj.stringOrNull("name")?.let { put("name", it) }
+            obj.stringOrNull("honorRarity")?.let { put("honorRarity", it) }
+            put("levels", positiveLevels)
+        }
+    }
+
+    /** 把三个 `powerN…Rate` 读成一个长度 3 的数组（缺省给 0）。 */
+    private fun rateArray(obj: JsonObject, key1: String, key2: String, key3: String): JsonArray =
+        buildJsonArray {
+            add(JsonPrimitive(obj.doubleOrNull(key1) ?: 0.0))
+            add(JsonPrimitive(obj.doubleOrNull(key2) ?: 0.0))
+            add(JsonPrimitive(obj.doubleOrNull(key3) ?: 0.0))
+        }
 }

@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.ui.screen
+﻿package com.pjsk.toolbox.ui.screen
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -74,6 +74,7 @@ import com.pjsk.toolbox.data.profile.PlayerSnapshot
 import com.pjsk.toolbox.data.profile.RarityBucket
 import com.pjsk.toolbox.data.profile.availableDifficulties
 import com.pjsk.toolbox.data.profile.cardStats
+import com.pjsk.toolbox.data.profile.computeDeckPower
 import com.pjsk.toolbox.data.profile.difficultyLabel
 import com.pjsk.toolbox.data.profile.materialStats
 import com.pjsk.toolbox.data.profile.musicStats
@@ -181,6 +182,14 @@ fun MyPlayerScreen(
     }
     val allMusicsById = remember(allMusics) { allMusics.associateBy { it.id } }
 
+    // ── 综合力用的 master data ──
+    // 四张表都在 masterRefRepository 里：区域道具加成率 / 称号加成 / 角色等级加成率；
+    // 卡牌剧情来自 cardRepository（算基础值时要加已读剧情的加成）。
+    val areaItemLevels by remember { masterRef.areaItemLevels }.collectAsState(initial = emptyMap())
+    val honorBonuses by remember { masterRef.honorBonuses }.collectAsState(initial = emptyMap())
+    val characterRankRates by remember { masterRef.characterRankRates }.collectAsState(initial = emptyMap())
+    val episodesByCard by remember { cardRepository.cardEpisodes }.collectAsState(initial = emptyMap())
+
     // Best30 的定数表是内置资源（27 KB CSV）。读盘 + 解析放 IO；读不出来就是空表，
     // 那一块整个不显示，不影响页面其余部分。
     val chartConstants by produceState<Map<Int, Map<String, Double>>>(emptyMap()) {
@@ -280,6 +289,40 @@ fun MyPlayerScreen(
                 unitColorOf(leaderCard, charsById, unitColors) ?: Color(0xFF6750A4)
             }
             val bondsAll = remember(snap.bonds) { sortBonds(snap.bonds) }
+            // 综合力：当前编成的持有卡 → 纯函数计算（算不出来就是 null，界面整块不显示）
+            val power = remember(
+                snap,
+                cardsById,
+                allCharacters,
+                areaItemLevels,
+                characterRankRates,
+                honorBonuses,
+                episodesByCard,
+            ) {
+                val deckOwned = snap.deckCardIds.mapNotNull { id ->
+                    snap.cards.firstOrNull { it.cardId == id }
+                }
+                val unitOf = { card: com.pjsk.toolbox.data.card.Card ->
+                    val base = allCharacters.firstOrNull { it.id == card.characterId }?.unitKey
+                    val support = card.supportUnit?.takeIf { it.isNotBlank() && it != "none" }
+                    buildList {
+                        support?.let { add(it) }
+                        base?.let { add(it) }
+                    }.distinct()
+                }
+                computeDeckPower(
+                    deckCards = deckOwned,
+                    cards = cardsById,
+                    episodesByCard = episodesByCard,
+                    userCharacterRanks = snap.characters.associate { it.characterId to it.characterRank },
+                    characterRankRates = characterRankRates,
+                    userAreaItems = snap.areaItems,
+                    areaItemLevels = areaItemLevels,
+                    honorBonuses = honorBonuses,
+                    userHonors = snap.honors,
+                    cardUnits = unitOf,
+                )
+            }
             val best30 = remember(snap.musicResults, chartConstants) {
                 computeBest30(snap.musicResults, chartConstants)
             }
@@ -402,6 +445,38 @@ fun MyPlayerScreen(
                             onClick = onOpenBest30,
                         )
                     }
+                }
+            }
+
+            // ── 综合力 ──
+            // 只有在「编成有卡 + 至少能算出基础值」时才显示；算不出来就整块不出现（不显示 0）
+            power?.let { p ->
+                CardModule("综合力") {
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Text(
+                            text = "%,d".format(p.total),
+                            style = MaterialTheme.typography.displaySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = accent,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            text = "${p.cardCount} 张卡",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    PowerRow("卡牌基础", p.base, p.total, MaterialTheme.colorScheme.primary)
+                    PowerRow("区域道具", p.areaItemBonus, p.total, MaterialTheme.colorScheme.secondary)
+                    PowerRow("角色等级", p.characterBonus, p.total, MaterialTheme.colorScheme.tertiary)
+                    PowerRow("称号", p.honorBonus, p.total, MaterialTheme.colorScheme.outline)
+                    Spacer(Modifier.height(4.dp))
+                    HintText(
+                        "按游戏公式本地估算：不含自定义世界（烤森）的家具/大门加成。" +
+                            "诊断：区域道具 ${p.areaItemCount} 件、称号 ${p.honorCount} 个。",
+                    )
                 }
             }
 
@@ -705,6 +780,24 @@ private fun RarityBarRow(bucket: RarityBucket, max: Int) {
         fraction = bucket.count.toFloat() / max,
         color = MaterialTheme.colorScheme.primary,
         valueText = "${bucket.count} 张",
+    )
+}
+
+/**
+ * 综合力的一行：标签 · 占比条 · 点数。
+ *
+ * 条的比例用「占总数」而不是「占最大项」—— 四项加起来正好 100%，
+ * 一眼就能看出哪一项贡献最大，也不用额外解释刻度。
+ */
+@Composable
+private fun PowerRow(label: String, value: Int, total: Int, color: Color) {
+    BarRow(
+        label = label,
+        fraction = if (total <= 0) 0f else value.toFloat() / total,
+        color = color,
+        valueText = "%,d".format(value),
+        labelWidth = 64,
+        valueWidth = 84,
     )
 }
 
@@ -1164,3 +1257,5 @@ private fun serverLabel(server: String): String = when (server) {
     "en" -> "国际服"
     else -> server
 }
+
+

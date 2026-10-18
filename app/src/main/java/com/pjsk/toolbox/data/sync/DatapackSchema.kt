@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.data.sync
+﻿package com.pjsk.toolbox.data.sync
 
 /**
  * 内置数据快照的**行格式版本**。
@@ -19,7 +19,7 @@ package com.pjsk.toolbox.data.sync
 object DatapackSchema {
 
     /** 当前代码期望的行格式版本。改裁剪器产出结构时必须 +1。 */
-    const val VERSION = 2
+    const val VERSION = 3
 
     /**
      * 每个版本**改动了哪些表的行格式**。
@@ -27,9 +27,18 @@ object DatapackSchema {
      *  - 1：最初的行格式（没有这一步之前的全部历史版本都算 1）；
      *  - 2：`gachas.json` 加了 `pk`（官方 `gachaPickups` 的卡 id）——
      *    卡池详情要靠它标 UP、排重点卡，老行里没有这个字段。
+     *  - 3：新增三张裁剪表 `areaItems` / `areaItemLevels` / `honors`（批次 C「综合力」）。
+     *    新表本来能随「表里没数据就导入」自动进来；但**已经在线同步过这几张表的老用户**
+     *    库里可能是未裁剪的原始行（`honors` 整表 3.7 MB），裁剪器不认那种行，
+     *    于是加成恒为 0 而且不报错。登记进 CHANGED 让他们重导一次。
      */
     val CHANGED: Map<Int, List<String>> = mapOf(
         2 to listOf(RowProjectors.GACHAS_FILE),
+        3 to listOf(
+            RowProjectors.AREA_ITEMS_FILE,
+            RowProjectors.AREA_ITEM_LEVELS_FILE,
+            RowProjectors.HONORS_FILE,
+        ),
     )
 
     /**

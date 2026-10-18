@@ -32,6 +32,25 @@ class MasterRefRepository(private val dao: MasterDao) {
     val characterColors: Flow<Map<Int, String>> =
         rowsOf(TABLE_CHARACTER_UNITS).map { rows -> parseCharacterColors(rows) }
 
+    // ── 综合力（批次 C）─────────────────────────────────────────
+    // 这四张表只在「我的 → 综合力」用得上，但都是 master data，所以放在这里而不是 PlayerRepository。
+
+    /** `(areaItemId, level)` → 区域道具加成率。 */
+    val areaItemLevels: Flow<Map<Long, AreaItemLevelRow>> =
+        rowsOf(TABLE_AREA_ITEM_LEVELS).map { rows -> parseAreaItemLevelRows(rows) }
+
+    /** 区域道具名（加成明细里显示「ミクのCD」而不是「道具 #1」）。 */
+    val areaItemNames: Flow<Map<Int, String>> =
+        rowsOf(TABLE_AREA_ITEMS).map { rows -> parseAreaItemNames(rows) }
+
+    /** `honorId → (level → bonus)`。裁剪后只有带正加成的称号（约 34 条）。 */
+    val honorBonuses: Flow<Map<Int, Map<Int, Int>>> =
+        rowsOf(TABLE_HONORS).map { rows -> parseHonorBonuses(rows) }
+
+    /** `(characterId, characterRank)` → 角色等级的三项加成率。 */
+    val characterRankRates: Flow<Map<Long, List<Double>>> =
+        rowsOf(TABLE_CHARACTER_RANKS).map { rows -> parseCharacterRankRates(rows) }
+
     private fun rowsOf(table: String): Flow<List<String>> =
         dao.observeAll(table).map { rows: List<MasterRowEntity> -> rows.map { row -> row.data } }
 
@@ -48,5 +67,9 @@ class MasterRefRepository(private val dao: MasterDao) {
     private companion object {
         const val TABLE_BONDS = "bonds.json"
         const val TABLE_CHARACTER_UNITS = "gameCharacterUnits.json"
+        const val TABLE_AREA_ITEMS = "areaItems.json"
+        const val TABLE_AREA_ITEM_LEVELS = "areaItemLevels.json"
+        const val TABLE_HONORS = "honors.json"
+        const val TABLE_CHARACTER_RANKS = "characterRanks.json"
     }
 }

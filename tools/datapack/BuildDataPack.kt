@@ -138,7 +138,16 @@ fun main(args: Array<String>) {
 
                 // 没有裁剪器时，把原始元素**紧凑化**：省掉缩进与换行。
                 // 这些数据在 APK 里会被再压缩一次，但紧凑化能减小安装后的占用与解析开销。
-                val stored: JsonObject = projector?.project(obj) ?: obj
+                //
+                // ⚠️ `null` 的语义必须与运行时导入（`MasterImporter`）**完全一致**：
+                // 那里写的是 `projector.project(obj)?.toString() ?: return@forEachElement`
+                // —— **null = 这一行不要**。这里原来写的是 `project(obj) ?: obj`（null 退回原始行），
+                // 于是「靠返回 null 来丢弃行」的裁剪器（`honors.json` 就是：8,801 行里只有 34 行
+                // 的加成不是 0）在快照里**一行都没少** —— 3.7 MB 原样进了 APK，而日志还显示
+                // 「已裁剪」。两条路径对同一份裁剪器给出不同结果，是最难查的一类不一致。
+                val projected: JsonObject? = projector?.project(obj)
+                if (projector != null && projected == null) return@forEachElement
+                val stored: JsonObject = projected ?: obj
                 if (rows > 0) writer.write(",")
                 writer.write(stored.toString())
                 rows++

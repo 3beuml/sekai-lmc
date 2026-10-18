@@ -91,6 +91,16 @@ object TableSchemas {
         // ⚠️ characterId1/2 是 gameCharacterUnits.id（style id），不是 gameCharacterId；
         //    翻译组名时必须先映射回基础角色，否则虚拟歌手(21–26)全会被认成同一个人。
         TableSchema("bonds.json"),
+        // ── 综合力（批次 C）──
+        // 区域道具名（56 行）：有 `id`，默认主键即可。
+        TableSchema("areaItems.json", nameKeys = listOf("name")),
+        // 区域道具等级（1,140 行 = 57 件 × 20 级）：**原始行没有 id**，
+        // 裁剪器会造一个 `id = areaItemId × 1000 + level`（见 RowProjectors.AREA_ITEM_LEVELS 的说明），
+        // 所以这里用默认主键 `id`。若哪天裁剪器失效，主键会退回 `areaItemId` → 同一件道具的
+        // 20 级互相覆盖，表现为「所有道具都是 20 级」，很难查 —— 这也是自检里断言了这一点的原因。
+        TableSchema("areaItemLevels.json", idKeys = listOf("id", "areaItemId")),
+        // 称号：裁剪后只剩带正加成的行（约 34 条），有 `id`。
+        TableSchema("honors.json", nameKeys = listOf("name")),
         // ⚠️ 没有 id 字段。实测字段：characterId, characterVoice, birthday, height, school,
         // schoolYear, hobby, specialSkill, favoriteFood, hatedFood, weak, introduction, scenarioId。
         // 主键退回 characterId —— 实测 26 行 26 个唯一值，安全。

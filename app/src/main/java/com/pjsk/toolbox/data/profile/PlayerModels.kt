@@ -42,6 +42,17 @@ data class OwnedCard(
     val trained: Boolean,
     /** `episodes` 里已读的篇数（影响卡面属性加成）。 */
     val episodesRead: Int,
+    /**
+     * 已读剧情的**原始键**（`userCards[].episodes` 里状态为已读的那些）。
+     *
+     * 键的含义上游没有文档：可能是 `cardEpisodeId`，也可能只是篇号 `1/2`，
+     * 所以这里**原样保留**，由 [com.pjsk.toolbox.data.profile.resolveReadEpisodes]
+     * 两种口径都试一遍（先当 id，再当篇号）。
+     *
+     * 为什么要它：综合力的「卡牌基础」里要把已读剧情的 `powerBonusFixed` 加起来。
+     * 只知道**读了几篇**是不够的 —— 前篇和后篇加的可能不一样多。
+     */
+    val readEpisodeKeys: Set<Int> = emptySet(),
 )
 
 /** 一条歌曲成绩（同一首歌的不同难度各一条）。 */
@@ -59,6 +70,17 @@ data class MaterialAmount(val materialId: Int, val quantity: Int)
 
 /** 角色等级（`userCharacters`）。 */
 data class OwnedCharacter(val characterId: Int, val characterRank: Int)
+
+/**
+ * 一件区域道具的等级（`userAreas[].areaItems[]`）。
+ *
+ * 加成率不在这里 —— 那是 master data `areaItemLevels.json` 的事，
+ * 由 `(areaItemId, level)` 去查（见 [DeckPower]）。
+ */
+data class OwnedAreaItem(val areaItemId: Int, val level: Int)
+
+/** 一个称号（`userHonors`）。加成数值同样要回 `honors.json` 查。 */
+data class OwnedHonor(val honorId: Int, val level: Int)
 
 /**
  * 羁绊（`userBonds`）。`bondsGroupId` 是组 id。
@@ -105,6 +127,17 @@ data class PlayerSnapshot(
     val characters: List<OwnedCharacter>,
     val bonds: List<OwnedBond>,
     val challengeStages: List<ChallengeStage>,
+    /** 区域道具等级（`userAreas[].areaItems`）。综合力的「区域道具」分项要用。 */
+    val areaItems: List<OwnedAreaItem> = emptyList(),
+    /** 称号（`userHonors`）。综合力的「称号」分项要用（固定值相加）。 */
+    val honors: List<OwnedHonor> = emptyList(),
+    /**
+     * **当前编成**的卡 id（`userDecks` 里 `deckId == userGamedata.deck` 那一套的 5 张卡）。
+     *
+     * 顺序是「队长 → 副队长 → member1..3」，只用于展示；算综合力时顺序无关。
+     * 空列表 = 快照里没有编成数据（那时综合力整块不显示，而不是算出一个 0）。
+     */
+    val deckCardIds: List<Int> = emptyList(),
 )
 
 // ─────────────────────────────────────────────────────────────
@@ -422,18 +455,15 @@ fun parseSnapshot(raw: String, account: PlayerAccount): PlayerSnapshot? {
         cards = root.array("userCards").mapNotNull { it as? JsonObject }.mapNotNull { card ->
             val id = card.int("cardId")
             if (id <= 0) return@mapNotNull null
+            val episodeInfo = parseEpisodeStatus(card["episodes"])
             OwnedCard(
                 cardId = id,
                 level = card.int("level"),
                 masterRank = card.int("masterRank"),
                 skillLevel = card.int("skillLevel"),
                 trained = card.str("specialTrainingStatus") == "done",
-                // `episodes` 形如 {"1":"read","2":"unread"}（上游形状未经逐字段实测，
-                // 所以这里只做"值里含 read 且不含 unread"的宽松判断，不假设具体结构）。
-                episodesRead = (card["episodes"] as? JsonObject)?.count { (_, v) ->
-                    val s = v.toString()
-                    s.contains("read") && !s.contains("unread")
-                } ?: 0,
+                episodesRead = episodeInfo.read,
+                readEpisodeKeys = episodeInfo.keys,
             )
         },
         musicResults = root.array("userMusicResults").mapNotNull { it as? JsonObject }.mapNotNull { r ->
@@ -474,7 +504,100 @@ fun parseSnapshot(raw: String, account: PlayerAccount): PlayerSnapshot? {
                     complete = s.str("challengeLiveStageStatus") == "complete",
                 )
             },
+        // 区域道具等级：userAreas[].areaItems[] 里每件一条
+        areaItems = root.array("userAreas").mapNotNull { it as? JsonObject }
+            .flatMap { area ->
+                (area["areaItems"] as? JsonArray).orEmpty().mapNotNull { element ->
+                    val item = element as? JsonObject ?: return@mapNotNull null
+                    val areaItemId = item.int("areaItemId")
+                    val level = item.int("level")
+                    if (areaItemId <= 0 || level <= 0) return@mapNotNull null
+                    OwnedAreaItem(areaItemId = areaItemId, level = level)
+                }
+            },
+        honors = root.array("userHonors").mapNotNull { it as? JsonObject }.mapNotNull { h ->
+            val honorId = h.int("honorId")
+            if (honorId <= 0) return@mapNotNull null
+            OwnedHonor(honorId = honorId, level = h.int("level"))
+        },
+        deckCardIds = currentDeckCardIds(currentDeck),
     )
+}
+
+// ── 快照里几处"形状不确定"的小解析（都单独抽出来，方便断言） ──
+
+/**
+ * `userCards[].episodes` 的解析结果：已读篇数 + 已读那些条目的原始键。
+ *
+ * 上游形状**没有逐字段实测过**，社区实现里见过两种：
+ *  - 数组：`[{"cardEpisodeId":15101,"scenarioStatus":"already_read"}, …]`
+ *  - 对象：`{"1":"read","2":"unread"}`
+ *
+ * 两种都认：数组取 `cardEpisodeId`（取不到就退回 `part`／下标），对象取键。
+ * 判断「已读」用同一套宽松规则：值里含 `read` 且不含 `unread`
+ * （`not_read` / `unread` / `lock` 都不算）。
+ */
+fun parseEpisodeStatus(element: kotlinx.serialization.json.JsonElement?): EpisodeStatus {
+    var read = 0
+    val keys = LinkedHashSet<Int>()
+    when (element) {
+        is JsonObject -> element.forEach { (key, value) ->
+            if (isAlreadyRead(value.toString())) {
+                read++
+                key.toIntOrNull()?.let { keys.add(it) }
+            }
+        }
+
+        is JsonArray -> element.forEachIndexed { index, item ->
+            val obj = item as? JsonObject ?: return@forEachIndexed
+            val status = obj["scenarioStatus"]?.toString().orEmpty()
+            if (!isAlreadyRead(status)) return@forEachIndexed
+            read++
+            // 优先 cardEpisodeId；拿不到就退回 part，再不行用下标（1 起）
+            val key = obj.int("cardEpisodeId").takeIf { it > 0 }
+                ?: obj.int("part").takeIf { it > 0 }
+                ?: (index + 1)
+            keys.add(key)
+        }
+
+        else -> Unit
+    }
+    return EpisodeStatus(read = read, keys = keys)
+}
+
+/**
+ * 这个状态字符串算不算「已读」。
+ *
+ * ⚠️ 这里踩过一个坑：最初写的是「含 `read` 且不含 `unread`」，
+ * 而 `not_read` **既含 `read` 又不含 `unread`** —— 于是「未读」被判成「已读」，
+ * 已读篇数虚高、综合力里的剧情加成也会多算。现在改成白名单 + 明确的否定词排除。
+ */
+internal fun isAlreadyRead(raw: String): Boolean {
+    val text = raw.trim().trim('"').lowercase()
+    if (text.isEmpty()) return false
+    if (text.contains("unread") || text.contains("not_read") || text.contains("notread")) return false
+    return text == "read" || text == "already_read" || text == "alreadyread"
+}
+
+/** [parseEpisodeStatus] 的结果。 */
+data class EpisodeStatus(val read: Int, val keys: Set<Int>)
+
+/**
+ * 当前编成的 5 张卡（队长 → 副队长 → member1..3），按出现顺序去重。
+ *
+ * 字段名来自实测（PROJECT_MEMORY §15.3）：`userDecks` 的行是
+ * `{deckId, name, leader, subLeader, member1..member5}`，其中 `leader` 是**卡 id**。
+ * 这里不假设 `member4/5` 不存在（上游将来可能扩到 6 张），有就收。
+ */
+fun currentDeckCardIds(deck: JsonObject?): List<Int> {
+    deck ?: return emptyList()
+    val out = LinkedHashSet<Int>(5)
+    listOf("leader", "subLeader", "member1", "member2", "member3", "member4", "member5")
+        .forEach { key ->
+            val id = deck.int(key)
+            if (id > 0) out.add(id)
+        }
+    return out.toList()
 }
 
 // ── JsonObject 取值小工具（都容错，缺了给默认值；上游加减字段不让界面崩） ──
@@ -494,3 +617,4 @@ private fun JsonObject.long(key: String): Long =
 
 private fun JsonObject.bool(key: String): Boolean =
     (this[key] as? JsonPrimitive)?.booleanOrNull ?: false
+

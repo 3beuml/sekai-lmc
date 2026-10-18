@@ -152,6 +152,18 @@ object TableCatalog {
         //    必须经 gameCharacterUnits 映射回基础角色（虚拟歌手每人有 6 个 style）。
         TableSpec("bonds.json", DataModule.CHARACTER, 82_106L),
 
+        // ── 综合力（2026-10 批次 C）────────────────────────────
+        // 区域道具：`userAreas[].areaItems[]` 只给 (areaItemId, level)，加成率在面积等级表里。
+        // 原始 12,568 B → 裁剪约 2.5 KB（只留 id/areaId/name，名字用于加成明细）。
+        TableSpec("areaItems.json", DataModule.CHARACTER, 12_568L),
+        // ⚠️ 这张表原始 521,267 B，其中 128,243 B 是带 `<color>` 的 `sentence` 说明文本（我们从不显示）。
+        //    裁剪后约 114 KB。**它是唯一按「道具 × 等级」组织的表**，没有 id 字段，
+        //    裁剪器会自己造 id（见 RowProjectors.AREA_ITEM_LEVELS）。
+        TableSpec("areaItemLevels.json", DataModule.CHARACTER, 521_267L),
+        // 称号：原始 3,694,822 B（8,801 行，体积全是每行最多 100 条 levels + 说明文本）。
+        // `bonus` 全文只有 0 与 10 两种值，只有 34 个等级是 10 → 裁剪后约 2.4 KB。
+        TableSpec("honors.json", DataModule.CHARACTER, 3_694_822L),
+
         // ── 音乐 ────────────────────────────────────────────────
         TableSpec("limitedTimeMusics.json", DataModule.MUSIC, 785L, cnOverlay = true),
         TableSpec("musicCollaborations.json", DataModule.MUSIC, 1_001L),
