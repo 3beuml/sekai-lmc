@@ -67,6 +67,18 @@ data class RecommendedDeck(
      * 所以这里用 Double —— 截成 Int 会把 230.5 显示成 230，而这个数在控分场景下是要精确对的。
      */
     val eventBonusTotal: Double?,
+    /**
+     * 请求了**精确加成档**（控分）时，引擎回报这一套对应哪个档位（百分数）。
+     * 没请求档位、或引擎没回这个字段时是 null —— 界面据此决定要不要显示「档 N%」。
+     */
+    val targetBonus: Int?,
+    /**
+     * 世界链接（WL）终章的**洗牌加成率**（百分数）。0 表示不是 WL 或没吃到。
+     *
+     * 为什么要单独露出来：WL 终章的加成 = 活动卡加成 + 洗牌加成，两截加起来能到 300%+。
+     * 只显示总数的话，用户会以为"这期活动加成怎么这么高"，看不出其中 50% 来自组队多样性。
+     */
+    val shuffleBonusRate: Int?,
     val multiLiveScoreUp: Double?,
 )
 
@@ -134,6 +146,9 @@ fun parseDeckRecommendResult(text: String): DeckRecommendResult {
             liveScore = obj.readDouble("live_score", "liveScore") ?: 0.0,
             eventPoint = obj.readInt("event_point", "eventPoint"),
             eventBonusTotal = obj.readDouble("event_bonus_total", "eventBonusTotal"),
+            // 控分档位：引擎可能叫 target_bonus / tier，两种都认
+            targetBonus = obj.readInt("target_bonus", "targetBonus", "tier"),
+            shuffleBonusRate = obj.readInt("shuffle_bonus_rate", "shuffleBonusRate"),
             multiLiveScoreUp = obj.readDouble("multi_live_score_up", "multiLiveScoreUp"),
         )
     }

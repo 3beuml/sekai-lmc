@@ -1,6 +1,10 @@
 ﻿package com.pjsk.toolbox.ui.screen
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -105,10 +109,50 @@ fun BindAccountScreen(
             // ── 前置条件：放在输入框之前，因为没做这两步填什么都没用 ──
             SectionTitle("先要做的两件事")
             Text(
-                text = "① 在 Haruki 工具箱注册并绑定你的游戏账号（改游戏内签名来验证）。\n" +
-                    "② 上传一次日服数据（日服用「继承码上传」，在网页里填引继 ID 与密码）。",
+                text = "① 在 Haruki 工具箱注册并绑定你的游戏账号（在游戏里改签名来验证归属，这一步不涉及密码）。\n" +
+                    "② 上传一次日服数据（看下面的警告再挑方式）。",
                 style = MaterialTheme.typography.bodySmall,
             )
+
+            // ── 引继码风险警告 ──
+            //
+            // ⚠️ 这一块是**事故换来的**（2026-10-18）：原来的文案直接推荐「日服用继承码上传」，
+            // 用户照做之后，自己这台设备就登不进游戏了（提示登录失败/账号异常）。
+            // 原因：引继码是**账号级、一次性的迁移凭据**，交给第三方服务器登录一次，
+            // 游戏侧就把账号的登录归属挪到了那次会话上，原设备的登录随之失效。
+            // Haruki 官方原话也写着「使用风险仍然需要自负」—— 我们不能只转述流程不提风险。
+            Spacer(Modifier.height(10.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f))
+                    .padding(10.dp),
+            ) {
+                Text(
+                    "别优先用「继承码上传」",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "引继码（引継ぎID + パスワード）是**账号级凭据**。交给任何第三方服务器登录，" +
+                        "游戏侧就可能把账号的登录归属挪到那次会话上 —— **你自己这台设备随后会登不进去**" +
+                        "（提示登录失败 / 账号异常）。这不是猜测：本 App 的作者就是这样中过一次。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "建议按这个顺序挑上传方式：\n" +
+                        "① 文件上传 / iOS 模块（不涉及引继码）\n" +
+                        "② HarukiProxy 抓包（要 root 或虚拟机，但不交任何凭据）\n" +
+                        "③ 最后才考虑继承码上传 —— **用完立刻回游戏重新发行引继码**，让旧作废。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = { openExternalLink(context, TOOLBOX_URL) }) {

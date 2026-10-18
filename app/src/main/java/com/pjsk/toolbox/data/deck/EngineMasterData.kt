@@ -278,6 +278,11 @@ enum class DeckLiveType(val key: String, val label: String) {
  * @param musicDiff 难度名（`easy`…`append`）；缺省引擎按 `expert` 处理，这里总要显式给。
  * @param multiTeammatePower / multiTeammateScoreUp 多人模式的队友综合力与技能值。
  *   不给就是 0 —— 结果会偏低，但**排名仍然可比**（同一份缺口对所有候选一样）。
+ * @param targetBonusList **控分**用：给定时走 `target=bonus` 的"精确档位"模式，
+ *   每个档位各返回一套 Top-K（引擎文档：`one Top-K per tier`，最多 32 档、每档 0..10000）。
+ *   给了档位就**不再**是"最大化加成" —— 那是两种语义，不要混。
+ *   ⚠️ 档位比较的是**实际加成值**，不是四舍五入后的显示值：4.8%/4.9%/5.1%/5.2% 的卡组
+ *   都**不算**命中 5%。
  */
 fun buildRecommendParams(
     target: DeckTarget = DeckTarget.POWER,
@@ -289,6 +294,7 @@ fun buildRecommendParams(
     musicDiff: String? = null,
     multiTeammatePower: Int? = null,
     multiTeammateScoreUp: Int? = null,
+    targetBonusList: List<Int>? = null,
 ): String = buildString(512) {
     append("{\"region\":\"jp\",\"live_type\":\"").append(liveType.key)
     append("\",\"target\":\"").append(target.key).append('"')
@@ -301,6 +307,15 @@ fun buildRecommendParams(
     }
     multiTeammatePower?.let { append(",\"multi_teammate_power\":").append(it) }
     multiTeammateScoreUp?.let { append(",\"multi_teammate_score_up\":").append(it) }
+    // 控分档位：最多 32 档、每档 0..10000（引擎的硬限制，超了直接解析错误）
+    targetBonusList?.takeIf { it.isNotEmpty() }?.let { tiers ->
+        append(",\"target_bonus_list\":[")
+        tiers.take(32).forEachIndexed { index, tier ->
+            if (index > 0) append(',')
+            append(tier.coerceIn(0, 10_000))
+        }
+        append(']')
+    }
     for (rarity in listOf("rarity1", "rarity2", "rarity3", "rarity4", "rarityBirthday")) {
         append(",\"${rarity}Config\":{\"disable\":false,\"levelMax\":false,\"episodeRead\":false")
         append(",\"masterMax\":false,\"skillMax\":false}")

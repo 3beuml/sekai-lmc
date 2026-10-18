@@ -63,6 +63,10 @@ if (-not (Test-Path (Join-Path $fixtureDir 'card1-raw.json'))) {
 
 # ── 2. 编译自检代码 ────────────────────────────────────────────────
 $checkSrc = Join-Path $PSScriptRoot 'logic-check\LogicCheck.kt'
+# ⚠️ 第二个源文件：`LogicCheck.kt` 的 main() 已经撞到 JVM 的 MethodTooLargeException
+# （单方法 64KB 上限），所以新加的节一律写成 LogicCheckDeck.kt 里的独立函数。
+# **两个文件都必须在默认包**（没有 package 声明）—— Kotlin 不允许从默认包 import。
+$checkSrc2 = Join-Path $PSScriptRoot 'logic-check\LogicCheckDeck.kt'
 $outDir = Join-Path $root 'build\logic-check'
 $checkClasses = Join-Path $outDir 'classes'
 New-Item -ItemType Directory -Path $checkClasses -Force | Out-Null
@@ -83,6 +87,7 @@ $argFile = Join-Path $outDir 'kotlinc-args.txt'
     (ConvertTo-ArgLine (Join-Path $klib '*'))
     'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler'
     (ConvertTo-ArgLine $checkSrc)
+    (ConvertTo-ArgLine $checkSrc2)
     '-classpath'
     (ConvertTo-ArgLine $fullClasspath)
     '-jvm-target'

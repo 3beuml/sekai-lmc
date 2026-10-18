@@ -97,6 +97,7 @@ import com.pjsk.toolbox.data.settings.NameLanguage
 import com.pjsk.toolbox.ui.common.PlayerDataGate
 import com.pjsk.toolbox.ui.common.displayName
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -205,9 +206,19 @@ fun DeckRecommendScreen(
     var teammateScoreUp by rememberSaveable { mutableStateOf("") }
     /** 「重新推荐」/「重新载入」用来强制重跑搜索（LaunchedEffect 只认 key 变化）。 */
     var searchToken by remember { mutableStateOf(0) }
+    /** 控分：精确加成档（逗号分隔，空 = 最大化加成）。 */
+    var bonusTiers by rememberSaveable { mutableStateOf("") }
 
     val target = DeckTarget.entries.firstOrNull { it.key == targetKey } ?: DeckTarget.POWER
     val liveType = DeckLiveType.entries.firstOrNull { it.key == liveKey } ?: DeckLiveType.SOLO
+    // 档位解析：只收 0..10000 的整数，最多 32 档（引擎硬限制）
+    val parsedTiers: List<Int> = remember(bonusTiers) {
+        bonusTiers.split(',', '，', ' ', '\n')
+            .mapNotNull { it.trim().toIntOrNull() }
+            .filter { it in 0..10_000 }
+            .distinct()
+            .take(32)
+    }
     // 输入齐不齐决定「能不能搜」：缺活动的加成、缺曲目的分数都不该去问引擎 ——
     // 那会让引擎按兜底表算出一个看起来正常、实际不对的数字。
     val inputsReady = when (target) {
@@ -241,6 +252,9 @@ fun DeckRecommendScreen(
                 musicDiff = musicDiff,
                 multiTeammatePower = teammatePower.trim().toIntOrNull(),
                 multiTeammateScoreUp = teammateScoreUp.trim().toIntOrNull(),
+                // 控分：只有在「活动加成」模式下、且真的填了档位时才走精确档位；
+                // 空着就是"最大化加成"——那是两种不同语义，不能默认填。
+                targetBonusList = parsedTiers.takeIf { target == DeckTarget.BONUS },
             ),
         )
     }
@@ -286,10 +300,13 @@ fun DeckRecommendScreen(
     }
 
     // 唯一的触发点：masterdata 装好了、输入也齐了，就（重新）搜一次。
-    // 换目标 / 换玩法 / 换活动 / 换曲目 / 点「重新推荐」都会走到这里。
+    // 换目标 / 换玩法 / 换活动 / 换曲目 / 改控分档 / 点「重新推荐」都会走到这里。
+    //
+    // ⚠️ `bonusTiers` 必须在 key 里 —— 漏了它，输入控分档位不会触发重搜（真机上踩过：
+    // 输入框里明明写了 265，日志里一次新搜索都没有）。
     LaunchedEffect(
         masterLoaded, searchToken,
-        targetKey, liveKey, eventId, musicId, musicDiff, teammatePower, teammateScoreUp,
+        targetKey, liveKey, eventId, musicId, musicDiff, teammatePower, teammateScoreUp, bonusTiers,
     ) {
         if (!masterLoaded) return@LaunchedEffect
         if (!inputsReady) {
@@ -299,6 +316,10 @@ fun DeckRecommendScreen(
             stage = RecStage.Idle
             return@LaunchedEffect
         }
+        // 防抖：控分档是逐字符输入的（"265" 会连发三次变化），
+        // 而档位搜索比综合力搜索贵得多（真机实测 998 个节点 vs 17 个）。
+        // 放在 effect 里的 delay 天然带取消语义 —— 只跑最后一次。
+        delay(400)
         runRecommend(snapshot)
     }
 
@@ -387,6 +408,7 @@ fun DeckRecommendScreen(
             liveType = liveType,
             eventId = eventId,
             eventLabel = eventLabel,
+            bonusTiers = bonusTiers,
             musicId = musicId,
             musicLabel = musicLabel,
             musicDiff = musicDiff,
@@ -395,6 +417,7 @@ fun DeckRecommendScreen(
             inputsReady = inputsReady,
             onPickTarget = { targetKey = it.key },
             onPickLiveType = { liveKey = it.key },
+            onBonusTiers = { bonusTiers = it },
             onPickEvent = { id, label ->
                 eventId = id
                 eventLabel = label
@@ -469,6 +492,7 @@ private fun RecommendContent(
     liveType: DeckLiveType,
     eventId: Int?,
     eventLabel: String,
+    bonusTiers: String,
     musicId: Int?,
     musicLabel: String,
     musicDiff: String,
@@ -477,6 +501,7 @@ private fun RecommendContent(
     inputsReady: Boolean,
     onPickTarget: (DeckTarget) -> Unit,
     onPickLiveType: (DeckLiveType) -> Unit,
+    onBonusTiers: (String) -> Unit,
     onPickEvent: (Int, String) -> Unit,
     onPickMusic: (Int, String) -> Unit,
     onPickMusicDiff: (String) -> Unit,
@@ -582,10 +607,12 @@ private fun RecommendContent(
                     eventLabel = eventLabel,
                     musicLabel = musicLabel,
                     musicDiff = musicDiff,
+                    bonusTiers = bonusTiers,
                     teammatePower = teammatePower,
                     teammateScoreUp = teammateScoreUp,
                     onPickTarget = onPickTarget,
                     onPickLiveType = onPickLiveType,
+                    onBonusTiers = onBonusTiers,
                     onOpenEventPicker = { showEventPicker = true },
                     onOpenMusicPicker = { showMusicPicker = true },
                     onPickMusicDiff = onPickMusicDiff,
@@ -860,10 +887,12 @@ private fun ModeCard(
     eventLabel: String,
     musicLabel: String,
     musicDiff: String,
+    bonusTiers: String,
     teammatePower: String,
     teammateScoreUp: String,
     onPickTarget: (DeckTarget) -> Unit,
     onPickLiveType: (DeckLiveType) -> Unit,
+    onBonusTiers: (String) -> Unit,
     onOpenEventPicker: () -> Unit,
     onOpenMusicPicker: () -> Unit,
     onPickMusicDiff: (String) -> Unit,
@@ -914,6 +943,38 @@ private fun ModeCard(
                         onClick = onOpenEventPicker,
                     )
                 }
+            }
+
+            // 控分：只在「活动加成」模式下出现。
+            // 空着 = 最大化加成；填了 = 精确命中这些档位（每档各返回一套）。
+            if (target == DeckTarget.BONUS) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("控分档", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(32.dp))
+                    OutlinedTextField(
+                        value = bonusTiers,
+                        // 只留数字与分隔符：填字母只会让档位解析默默丢弃
+                        onValueChange = { text ->
+                            onBonusTiers(text.filter { it.isDigit() || it == ',' || it == '，' || it == ' ' }.take(120))
+                        },
+                        label = { Text("加成 %（留空=最大化）", style = MaterialTheme.typography.labelSmall) },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodySmall,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Text(
+                    "填了就按「精确命中该加成档」来找卡组，**不再是最大化加成**。" +
+                        "多个档位用逗号隔开（最多 32 档），每档各给一套；凑不出来的档位会是空的。" +
+                        "⚠️ 引擎返回里**不标档位**（真机实测无 target_bonus / tier 字段），" +
+                        "所以看每套自己的「加成 X%」就知道它属于哪一档 —— 引擎比的是**实际加成值**，" +
+                        "4.8%/5.1% 的卡组都不算命中 5%。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             if (target == DeckTarget.SCORE) {
@@ -1149,7 +1210,13 @@ private fun RecommendDeckCard(
                         DiffFromCurrent(deck.totalPower, currentPower)
                     } else {
                         Text(
-                            text = secondaryMetrics(deck, target),
+                            text = buildString {
+                                // 引擎不标档位（真机实测没有 target_bonus / tier 字段），
+                                // 所以控分模式下"这属于哪一档"就靠主指标那个「加成 X%」自己看。
+                                // 这里只在引擎**真的**回了档位时才补一句（防御性，目前走不到）。
+                                deck.targetBonus?.let { append("档 $it% · ") }
+                                append(secondaryMetrics(deck, target))
+                            },
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1225,10 +1292,10 @@ private fun secondaryMetrics(deck: RecommendedDeck, target: DeckTarget): String 
     if (target != DeckTarget.SCORE && deck.liveScore >= 1.0) {
         add("得分 %,d".format(deck.liveScore.toLong()))
     }
+    // WL 终章的洗牌加成单独说一句：它和"活动卡加成"是两截，混在一起看会误解
+    deck.shuffleBonusRate?.takeIf { it > 0 }?.let { add("洗牌 +$it%") }
     deck.eventPoint?.let { add("PT %,d".format(it)) }
-}.joinToString(" · ")
-
-/**
+}.joinToString(" · ")/**
  * 加成率文案。
  *
  * 引擎的加成按 **0.1%** 计（文档里明确写过 4.8% / 5.1% 这种半档是真实存在的），
