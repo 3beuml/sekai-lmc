@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.ui.screen
+﻿package com.pjsk.toolbox.ui.screen
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -233,19 +233,42 @@ private suspend fun buildMasterData(container: AppContainer): String {
     val dao = container.database.masterDao()
     suspend fun rows(table: String): List<String> = dao.observeAll(table).first().map { it.data }
     return withContext(Dispatchers.IO) {
-        val tables = linkedMapOf(
+        // 引擎按名取表：**缺一张就直接报错**（不是静默忽略）。所以这里对「我们没有的表」
+        // 显式给空数组 `[]`，让"缺少表"这类错误消失，剩下的才是真正要修的数据形状问题。
+        val restored = mapOf(
             "cards" to restoreCardsJson(rows("cards.json")),
-            "cardEpisodes" to rows("cardEpisodes.json").joinToString(",", "[", "]"),
-            "skills" to rows("skills.json").joinToString(",", "[", "]"),
-            "characterRanks" to rows("characterRanks.json").joinToString(",", "[", "]"),
             "areaItems" to restoreAreaItemsJson(rows("areaItems.json")),
             "areaItemLevels" to restoreAreaItemLevelsJson(rows("areaItemLevels.json")),
             "honors" to restoreHonorsJson(rows("honors.json")),
             "masterLessons" to restoreMasterLessonsJson(rows("masterLessons.json")),
-            "cardRarities" to rows("cardRarities.json").joinToString(",", "[", "]"),
-            "gameCharacters" to rows("gameCharacters.json").joinToString(",", "[", "]"),
-            "gameCharacterUnits" to rows("gameCharacterUnits.json").joinToString(",", "[", "]"),
         )
+        // 不需要裁剪的表直接给紧凑化后的原始行
+        val rawNames = listOf(
+            "cardEpisodes", "skills", "characterRanks", "cardRarities",
+            "gameCharacters", "gameCharacterUnits",
+            "events", "eventCards", "eventRarityBonusRates", "eventDeckBonuses",
+            "eventHonorBonuses", "eventTotalPowerLimits", "eventSkillScoreUpLimits",
+            "eventCardBonusLimits", "eventShuffleUnitBonuses", "worldBlooms",
+        )
+        // 我们快照里没有、但引擎会按名索要的表（给空数组，别让它报"缺少表"）
+        val emptyNames = listOf(
+            "areas", "shopItems", "ingameNotes", "ingameCombos",
+            "cardMysekaiCanvasBonuses", "mysekaiGates", "mysekaiGateLevels",
+            "worldBloomSupportDeckBonuses", "worldBloomSupportDeckBonusesWL1",
+            "worldBloomSupportDeckBonusesWL2", "worldBloomSupportDeckBonusesWL3",
+            "worldBloomDifferentAttributeBonuses", "worldBloomSupportDeckUnitEventLimitedBonuses",
+            "eventMysekaiFixtureGameCharacterPerformanceBonusLimits",
+        )
+        val tables = linkedMapOf<String, String>()
+        restored.forEach { (name, text) -> tables[name] = text }
+        for (name in rawNames) {
+            val tableRows = rows("$name.json")
+            tables[name] = if (tableRows.isEmpty()) "[]" else tableRows.joinToString(",", "[", "]")
+        }
+        for (name in emptyNames) tables[name] = "[]"
         buildMasterDataPayload(tables)
     }
 }
+
+
+
