@@ -57,6 +57,21 @@ data class MusicResult(
 /** 一种材料的持有量。 */
 data class MaterialAmount(val materialId: Int, val quantity: Int)
 
+/** 角色等级（`userCharacters`）。 */
+data class OwnedCharacter(val characterId: Int, val characterRank: Int)
+
+/** 羁绊（`userBonds`）。`bondsGroupId` 是组 id，**内置表里没有对应的组名表**，只能拿 id 展示。 */
+data class OwnedBond(val bondsGroupId: Int, val rank: Int)
+
+/** 挑战 Live 的一个 stage（`userChallengeLiveSoloStages`）。 */
+data class ChallengeStage(
+    val characterId: Int,
+    val stageId: Int,
+    val rank: Int,
+    val point: Int,
+    val complete: Boolean,
+)
+
 /** 玩家快照：公开套件 API 里我们真正要用的那部分。 */
 data class PlayerSnapshot(
     val account: PlayerAccount,
@@ -66,9 +81,21 @@ data class PlayerSnapshot(
     val rank: Int,
     val coin: Long,
     val totalExp: Long,
+    /** `userProfile.word` —— 游戏内那句签名。 */
+    val signature: String,
+    /**
+     * 头像类型（`userProfile.profileImageType`）。实测取值有 `leader`：
+     * 表示"头像就用当前编成队长的卡"。所以 [deckLeaderCardId] 才是头像的真正来源。
+     */
+    val profileImageType: String,
+    /** 当前编成队长的**卡 id**（来自 `userDecks` 里 deckId 与 `userGamedata.deck` 匹配的那一项）。 */
+    val deckLeaderCardId: Int,
     val cards: List<OwnedCard>,
     val musicResults: List<MusicResult>,
     val materials: List<MaterialAmount>,
+    val characters: List<OwnedCharacter>,
+    val bonds: List<OwnedBond>,
+    val challengeStages: List<ChallengeStage>,
 )
 
 // ─────────────────────────────────────────────────────────────
@@ -181,6 +208,50 @@ fun materialStats(materials: List<MaterialAmount>): MaterialStats = MaterialStat
     totalQuantity = materials.sumOf { it.quantity.toLong() },
 )
 
+/** 稀有度分布里的一个桶。 */
+data class RarityBucket(val rarityKey: String, val count: Int)
+
+/**
+ * 按稀有度统计持有卡。
+ *
+ * @param rarityOf cardId → 稀有度 key（`rarity_4` 之类）。查不到就归到 [UNKNOWN_RARITY]，
+ *   **不要静默丢掉** —— 界面要能看出"有 N 张卡没对上表"，那通常意味着快照与内置表版本不一致。
+ */
+fun rarityDistribution(cards: List<OwnedCard>, rarityOf: (Int) -> String?): List<RarityBucket> =
+    cards.groupBy { rarityOf(it.cardId) ?: UNKNOWN_RARITY }
+        .map { (key, list) -> RarityBucket(key, list.size) }
+        .sortedByDescending { bucket -> raritySortKey(bucket.rarityKey) }
+
+/** 稀有度排序用的权重（`rarity_4` 最大；未知排最后）。 */
+fun raritySortKey(rarityKey: String): Int = when (rarityKey) {
+    "rarity_birthday" -> 5
+    "rarity_4" -> 4
+    "rarity_3" -> 3
+    "rarity_2" -> 2
+    "rarity_1" -> 1
+    else -> 0
+}
+
+/** 稀有度的展示名。 */
+fun rarityLabel(rarityKey: String): String = when (rarityKey) {
+    "rarity_birthday" -> "生日"
+    "rarity_4" -> "4★"
+    "rarity_3" -> "3★"
+    "rarity_2" -> "2★"
+    "rarity_1" -> "1★"
+    else -> "未知"
+}
+
+const val UNKNOWN_RARITY = "unknown"
+
+/** 羁绊按等级降序（等级相同按组 id 升序，保证稳定）。 */
+fun sortBonds(bonds: List<OwnedBond>): List<OwnedBond> =
+    bonds.sortedWith(compareByDescending<OwnedBond> { it.rank }.thenBy { it.bondsGroupId })
+
+/** 角色等级按等级降序（让高等级的角色排在网格前面，一眼看到主力）。 */
+fun sortCharacters(chars: List<OwnedCharacter>): List<OwnedCharacter> =
+    chars.sortedWith(compareByDescending<OwnedCharacter> { it.characterRank }.thenBy { it.characterId })
+
 // ─────────────────────────────────────────────────────────────
 // 解析（纯函数，可断言）
 // ─────────────────────────────────────────────────────────────
@@ -202,6 +273,14 @@ fun parseSnapshot(raw: String, account: PlayerAccount): PlayerSnapshot? {
     val root = runCatching { lenientJson.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return null
     val gamedata = root.obj("userGamedata") ?: return null
 
+    // 当前编成队长：userGamedata.deck 是"当前使用的编成 id"，
+    // 到 userDecks 里找 deckId 相同的那一项，它的 leader 就是队长卡 id。
+    // 找不到就退回第一套编成的 leader（头像这里不值得因为数据缺失就空着）。
+    val currentDeckId = gamedata.int("deck")
+    val decks = root.array("userDecks").mapNotNull { it as? JsonObject }
+    val currentDeck = decks.firstOrNull { it.int("deckId") == currentDeckId } ?: decks.firstOrNull()
+    val leaderCardId = currentDeck?.int("leader") ?: 0
+
     return PlayerSnapshot(
         account = account,
         uploadTime = root.long("upload_time").let { if (it > 1_000_000_000_000L) it / 1000 else it },
@@ -209,6 +288,9 @@ fun parseSnapshot(raw: String, account: PlayerAccount): PlayerSnapshot? {
         rank = gamedata.int("rank"),
         coin = gamedata.long("coin"),
         totalExp = gamedata.long("totalExp"),
+        signature = root.obj("userProfile")?.str("word").orEmpty(),
+        profileImageType = root.obj("userProfile")?.str("profileImageType").orEmpty(),
+        deckLeaderCardId = leaderCardId,
         cards = root.array("userCards").mapNotNull { it as? JsonObject }.mapNotNull { card ->
             val id = card.int("cardId")
             if (id <= 0) return@mapNotNull null
@@ -242,6 +324,28 @@ fun parseSnapshot(raw: String, account: PlayerAccount): PlayerSnapshot? {
             if (id <= 0) return@mapNotNull null
             MaterialAmount(materialId = id, quantity = m.int("quantity"))
         },
+        characters = root.array("userCharacters").mapNotNull { it as? JsonObject }.mapNotNull { c ->
+            val id = c.int("characterId")
+            if (id <= 0) return@mapNotNull null
+            OwnedCharacter(characterId = id, characterRank = c.int("characterRank"))
+        },
+        bonds = root.array("userBonds").mapNotNull { it as? JsonObject }.mapNotNull { b ->
+            val id = b.int("bondsGroupId")
+            if (id <= 0) return@mapNotNull null
+            OwnedBond(bondsGroupId = id, rank = b.int("rank"))
+        },
+        challengeStages = root.array("userChallengeLiveSoloStages").mapNotNull { it as? JsonObject }
+            .mapNotNull { s ->
+                val cid = s.int("characterId")
+                if (cid <= 0) return@mapNotNull null
+                ChallengeStage(
+                    characterId = cid,
+                    stageId = s.int("challengeLiveStageId"),
+                    rank = s.int("rank"),
+                    point = s.int("point"),
+                    complete = s.str("challengeLiveStageStatus") == "complete",
+                )
+            },
     )
 }
 

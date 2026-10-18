@@ -132,8 +132,14 @@ import com.pjsk.toolbox.data.profile.difficultyLabel
 import com.pjsk.toolbox.data.profile.isValidGameId
 import com.pjsk.toolbox.data.profile.materialStats
 import com.pjsk.toolbox.data.profile.musicStats
+import com.pjsk.toolbox.data.profile.UNKNOWN_RARITY
+import com.pjsk.toolbox.data.profile.OwnedCard
 import com.pjsk.toolbox.data.profile.normalizeGameId
 import com.pjsk.toolbox.data.profile.parseSnapshot
+import com.pjsk.toolbox.data.profile.rarityDistribution
+import com.pjsk.toolbox.data.profile.rarityLabel
+import com.pjsk.toolbox.data.profile.sortBonds
+import com.pjsk.toolbox.data.profile.sortCharacters
 import com.pjsk.toolbox.data.remote.TableCatalog
 import com.pjsk.toolbox.data.story.StoryAssetKind
 import com.pjsk.toolbox.data.sync.DatapackImportOrder
@@ -2631,6 +2637,24 @@ fun main(args: Array<String>) {
           "userMaterials": [
             { "materialId": 1, "quantity": 30 },
             { "materialId": 2, "quantity": 0 }
+          ],
+          "userProfile": { "profileImageType": "leader", "word": "hi" },
+          "userDecks": [
+            { "deckId": 7, "leader": 140, "name": "A" },
+            { "deckId": 1, "leader": 141, "name": "B" }
+          ],
+          "userCharacters": [
+            { "characterId": 2, "characterRank": 20 },
+            { "characterId": 1, "characterRank": 30 },
+            { "characterId": 3, "characterRank": 20 }
+          ],
+          "userBonds": [
+            { "bondsGroupId": 10103, "rank": 8 },
+            { "bondsGroupId": 10102, "rank": 12 }
+          ],
+          "userChallengeLiveSoloStages": [
+            { "characterId": 17, "challengeLiveStageId": 1601, "rank": 1, "point": 50, "challengeLiveStageStatus": "complete" },
+            { "characterId": 17, "challengeLiveStageId": 1603, "rank": 3, "point": 89, "challengeLiveStageStatus": "in_progress" }
           ]
         }
     """.trimIndent()
@@ -2669,6 +2693,49 @@ fun main(args: Array<String>) {
         checkEq("材料种类", matStats.kinds, 2)
         checkEq("持有中的材料种类（数量 > 0）", matStats.nonZeroKinds, 1)
         checkEq("材料数量合计", matStats.totalQuantity, 30L)
+
+        // ── 头像 / 编成：profileImageType=leader 时头像取"当前编成"的队长 ──
+        checkEq("签名", snap.signature, "hi")
+        checkEq("头像类型", snap.profileImageType, "leader")
+        // userGamedata.deck 在夹具里是当前编成 id（这里夹具没给 deck，落到第一套编成的 leader=140）
+        checkEq("队长卡 id（找不到当前编成时退回第一套）", snap.deckLeaderCardId, 140)
+
+        checkEq("角色等级条数", snap.characters.size, 3)
+        checkEq("羁绊条数", snap.bonds.size, 2)
+        checkEq("挑战 Live stage 条数", snap.challengeStages.size, 2)
+        check("挑战 Live complete 被识别", snap.challengeStages.first { it.stageId == 1601 }.complete)
+        check("挑战 Live in_progress 不算完成", !snap.challengeStages.first { it.stageId == 1603 }.complete)
+
+        // ── 排序：等级降序、同级按 id 升序（保证界面稳定，不随上游顺序跳） ──
+        checkEq(
+            "角色按等级降序、同级按 id 升序",
+            sortCharacters(snap.characters).map { it.characterId },
+            listOf(1, 2, 3),
+        )
+        checkEq(
+            "羁绊按等级降序",
+            sortBonds(snap.bonds).map { it.bondsGroupId },
+            listOf(10102, 10103),
+        )
+
+        // ── 稀有度分布：查不到稀有度的卡归到 unknown，不能静默丢掉 ──
+        val rarityOf: (Int) -> String? = { id ->
+            when (id) {
+                140 -> "rarity_4"
+                141 -> "rarity_birthday"
+                else -> null
+            }
+        }
+        val dist = rarityDistribution(snap.cards, rarityOf)
+        checkEq("稀有度分桶数", dist.size, 2)
+        checkEq("生日卡排在 4★ 之前（权重 5 > 4）", dist.first().rarityKey, "rarity_birthday")
+        checkEq("稀有度展示名", rarityLabel("rarity_4"), "4★")
+        checkEq(
+            "对不上表的卡归到 unknown 而不是消失",
+            rarityDistribution(listOf(snap.cards.first(), OwnedCard(99999, 1, 0, 1, false, 0)), rarityOf)
+                .firstOrNull { it.rarityKey == UNKNOWN_RARITY }?.count,
+            1,
+        )
     }
 
     // 顶层没有 userGamedata → 不是一份可用快照，返回 null 而不是抛异常

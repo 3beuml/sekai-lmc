@@ -107,6 +107,7 @@ class PlayerRepository(
          * ⚠️ 这不是凭据，是**字段选择器** —— 上游文档里 `?key=` 用来挑返回哪些表，
          * 不带也能读全（但响应会有几百 KB）。少要一点对上游的服务也更客气。
          */
-        private const val KEYS = "userGamedata,userCards,userMusicResults,userMaterials,upload_time"
+        private const val KEYS = "userGamedata,userCards,userMusicResults,userMaterials," +
+            "userProfile,userDecks,userCharacters,userBonds,userChallengeLiveSoloStages,upload_time"
     }
 }

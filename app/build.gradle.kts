@@ -1,4 +1,4 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+﻿import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 // 必须显式 import：在 Kotlin DSL 脚本里写 `java.util.zip.ZipFile` 会被解析成
 // Gradle 的 `java` 扩展（JavaPluginExtension），而不是 Java 的包名，
 // 报错是「Unresolved reference: util」。
@@ -34,8 +34,8 @@ android {
         applicationId = "com.pjsk.toolbox"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
-        versionName = "0.1.9"
+        versionCode = 11
+        versionName = "0.1.10"
     }
 
     signingConfigs {
