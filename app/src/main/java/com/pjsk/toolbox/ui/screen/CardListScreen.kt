@@ -421,45 +421,6 @@ fun CardListScreen(
 }
 
 /**
- * 「我的卡牌」进不来时的两种前置状态：没绑定账号 / 本地没有这份账号的卡牌数据。
- *
- * 为什么不直接渲染空图鉴：那会显示「共 0 张」或干脆全量卡牌，用户会以为自己的卡丢了。
- * 这里明确说清缺什么、下一步点哪里。
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MyCardsNotReady(
-    reason: String,
-    actionLabel: String,
-    onBack: (() -> Unit)? = null,
-    onAction: () -> Unit,
-) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("我的卡牌") },
-                navigationIcon = {
-                    if (onBack != null) {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                        }
-                    }
-                },
-            )
-        },
-    ) { padding ->
-        Box(modifier = Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.Center) {
-            EmptyState(
-                title = "暂时看不到我的卡牌",
-                description = reason,
-                actionLabel = actionLabel,
-                onAction = onAction,
-            )
-        }
-    }
-}
-
-/**
  * 单个卡牌条目。
  *
  * 图框是 16:9；左半边未特训、右半边觉醒，两张图都用居中裁切。

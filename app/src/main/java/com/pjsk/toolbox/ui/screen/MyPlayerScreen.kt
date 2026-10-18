@@ -123,6 +123,8 @@ fun MyPlayerScreen(
     onOpenBind: () -> Unit,
     /** 「卡牌」模块点进去 → 卡牌图鉴的「我的卡牌」模式（已拥有 / 未拥有）。 */
     onOpenMyCards: () -> Unit,
+    /** 「歌曲成绩」模块点进去 → 按难度看已打 / FC / AP，并筛出没 FC / 没 AP 的曲目。 */
+    onOpenMyMusic: () -> Unit,
 ) {
     val context = LocalContext.current
     val container = (context.applicationContext as PjskApp).container
@@ -264,7 +266,11 @@ fun MyPlayerScreen(
                 }
             }
 
-            CardModule("歌曲成绩") {
+            CardModule(
+                title = "歌曲成绩",
+                actionLabel = "我的歌曲",
+                onAction = onOpenMyMusic,
+            ) {
                 val music = musicStats(snap.musicResults)
                 if (music.isEmpty()) {
                     HintText("快照里没有歌曲成绩。")

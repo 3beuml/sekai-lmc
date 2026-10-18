@@ -161,6 +161,17 @@ data class DifficultyStat(
 private val DIFFICULTY_ORDER = listOf("easy", "normal", "hard", "expert", "master", "append")
 
 /**
+ * 难度在展示顺序里的下标；认不出的难度返回 [DIFFICULTY_ORDER] 的长度（= 排最后）。
+ *
+ * 公开出来是因为「我的歌曲」也要按同一顺序排难度 —— 两处各写一份排序键，
+ * 迟早会出现「歌曲页 Easy…Append、我的歌曲乱序」这种没人发现的不一致。
+ */
+fun difficultyOrder(difficulty: String): Int {
+    val i = DIFFICULTY_ORDER.indexOf(difficulty.lowercase())
+    return if (i >= 0) i else DIFFICULTY_ORDER.size
+}
+
+/**
  * 按难度汇总成绩。
  *
  * 同一首歌同一难度只应有一条；上游若给了多条，这里按"取最好"合并（任一 FC 即 FC），
@@ -191,10 +202,7 @@ fun musicStats(results: List<MusicResult>): List<DifficultyStat> {
                 allPerfect = list.count { it.allPerfect },
             )
         }
-        .sortedBy { stat ->
-            val i = DIFFICULTY_ORDER.indexOf(stat.difficulty.lowercase())
-            if (i >= 0) i else DIFFICULTY_ORDER.size
-        }
+        .sortedBy { stat -> difficultyOrder(stat.difficulty) }
 }
 
 /** 难度字符串的展示名。 */

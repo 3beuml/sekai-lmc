@@ -140,6 +140,17 @@ import com.pjsk.toolbox.data.profile.normalizeGameId
 import com.pjsk.toolbox.data.profile.parseBondRows
 import com.pjsk.toolbox.data.profile.parseCharacterColors
 import com.pjsk.toolbox.data.profile.parseOwnedCardIds
+import com.pjsk.toolbox.data.profile.DifficultySummary
+import com.pjsk.toolbox.data.profile.MusicResult
+import com.pjsk.toolbox.data.profile.SongPlayFilter
+import com.pjsk.toolbox.data.profile.SongPlayStatus
+import com.pjsk.toolbox.data.profile.availableDifficulties
+import com.pjsk.toolbox.data.profile.difficultyOrder
+import com.pjsk.toolbox.data.profile.difficultySummary
+import com.pjsk.toolbox.data.profile.filterSongsByPlayStatus
+import com.pjsk.toolbox.data.profile.playStatusIndex
+import com.pjsk.toolbox.data.profile.songsWithDifficulty
+import com.pjsk.toolbox.data.profile.sortForWork
 import com.pjsk.toolbox.data.profile.parseSnapshot
 import com.pjsk.toolbox.data.profile.parseStyleToBase
 import com.pjsk.toolbox.data.profile.resolveBondPairs
@@ -2928,6 +2939,129 @@ fun main(args: Array<String>) {
             )
         }
     }
+
+    // ─────────────────────────────────────────────────────────
+    section("24. 我的歌曲：按难度归档成绩 / 没 FC / 没 AP 筛选 / 汇总")
+    // ─────────────────────────────────────────────────────────
+    // 这一节防的是**分母拿错**。三个数字（已打 / FC / AP）的分母都必须是
+    // 「内置谱面里真有这一难度的曲目数」，而不是"我打过的首数"——
+    // 后者会让每个难度都显示 100%，一眼看着很漂亮，实际毫无信息。
+    // 另一半防的是「从没打过的歌」被漏掉：它们当然没 FC，
+    // 而那正是「没 FC」清单里最该被看见的一批。
+    fun wsong(id: Int) = HomeMusic(
+        id = id,
+        title = "Song$id",
+        assetbundleName = "jacket_s_$id",
+        publishedAt = 1000L,
+        unitTags = emptyList(),
+        categories = emptyList(),
+        composer = null,
+    )
+    val workSongs = listOf(wsong(1), wsong(2), wsong(3), wsong(4), wsong(5))
+    // 1、2、3 有 master；4 只有 expert（不该出现在 master 的统计和列表里）；5 数据缺失
+    val workLevels = mapOf(
+        1 to mapOf("master" to 32, "expert" to 26),
+        2 to mapOf("master" to 27, "expert" to 22),
+        3 to mapOf("master" to 35, "expert" to 28),
+        4 to mapOf("expert" to 31),
+    )
+    val workResults = listOf(
+        // 1：AP（两条重复行，合并后仍是 1 首）
+        MusicResult(1, "master", fullCombo = true, allPerfect = true, highScore = 1_500_000),
+        MusicResult(1, "master", fullCombo = true, allPerfect = false, highScore = 1_400_000),
+        // 2：只有 FC
+        MusicResult(2, "master", fullCombo = true, allPerfect = false, highScore = 1_000_000),
+        // 3：打过了但没 FC
+        MusicResult(3, "master", fullCombo = false, allPerfect = false, highScore = 900_000),
+        // 5 从没打过
+        // 4 的 expert 成绩不该混进 master 的索引
+        MusicResult(4, "expert", fullCombo = true, allPerfect = true, highScore = 1_200_000),
+    )
+
+    val masterIndex = playStatusIndex(workResults, "master")
+    checkEq("索引只装这一难度（expert 的成绩不混进来）", masterIndex.keys.sorted(), listOf(1, 2, 3))
+    checkEq("同曲两条合并成 1 条", masterIndex.size, 3)
+    checkEq("★ 任一条 AP 即 AP（不因重复行被算成「打两次」）", masterIndex[1]?.allPerfect, true)
+    checkEq("只有 FC 的那种：FC 真、AP 假", masterIndex[2]?.let { it.fullCombo to it.allPerfect }, true to false)
+    checkEq("打过了但没 FC", masterIndex[3]?.fullCombo, false)
+    checkEq("难度大小写不敏感（上游大小写不做假设）", playStatusIndex(workResults, "MASTER").size, 3)
+    checkEq("没成绩的歌不在索引里（查出来是 null 而不是「打过」）", masterIndex[5], null)
+
+    val masterSongs = songsWithDifficulty(workSongs, workLevels, "master")
+    checkEq("★ 只有真有该难度的歌才进分母（5 → 3）", masterSongs.map { it.id }, listOf(1, 2, 3))
+    checkEq(
+        "谱面表还没同步时退化成全部歌（不显示空列表）",
+        songsWithDifficulty(workSongs, emptyMap(), "master").size,
+        5,
+    )
+
+    checkEq("全部 = 原样", filterSongsByPlayStatus(masterSongs, masterIndex, SongPlayFilter.ALL).map { it.id }, listOf(1, 2, 3))
+    checkEq("已打过", filterSongsByPlayStatus(masterSongs, masterIndex, SongPlayFilter.PLAYED).map { it.id }, listOf(1, 2, 3))
+    checkEq(
+        "★ 没 FC 只剔掉真 FC 过的（AP 也算 FC）",
+        filterSongsByPlayStatus(masterSongs, masterIndex, SongPlayFilter.NO_FC).map { it.id },
+        listOf(3),
+    )
+    checkEq(
+        "没 AP = 除 AP 之外全部",
+        filterSongsByPlayStatus(masterSongs, masterIndex, SongPlayFilter.NO_AP).map { it.id },
+        listOf(2, 3),
+    )
+    checkEq(
+        "★ 从没打过的歌会出现在「没 FC」里（最该被看见的一批）",
+        filterSongsByPlayStatus(listOf(wsong(5)), emptyMap(), SongPlayFilter.NO_FC).map { it.id },
+        listOf(5),
+    )
+    checkEq(
+        "★ 也从没打过的歌出现在「已打过」里就不对了",
+        filterSongsByPlayStatus(listOf(wsong(5)), emptyMap(), SongPlayFilter.PLAYED).size,
+        0,
+    )
+
+    checkEq(
+        "工作清单按等级从低到高（27 → 32 → 35），不是按 id 或新歌",
+        sortForWork(
+            filterSongsByPlayStatus(masterSongs, masterIndex, SongPlayFilter.NO_AP),
+            workLevels,
+            "master",
+        ).map { it.id },
+        listOf(2, 3),
+    )
+    checkEq(
+        "等级未知的歌排在最后（不插到最前面）",
+        sortForWork(listOf(wsong(5), wsong(2)), workLevels, "master").map { it.id },
+        listOf(2, 5),
+    )
+
+    val masterSummary = difficultySummary("master", masterSongs, masterIndex)
+    checkEq(
+        "★ 汇总的分母是「有这一难度的曲目数」（3，不是打过的那几首）",
+        listOf(masterSummary.total, masterSummary.played, masterSummary.fullCombo, masterSummary.allPerfect),
+        listOf(3, 3, 2, 1),
+    )
+    // 脏数据：成绩里多出一条根本没有 master 的歌 → 计数不许超出分母
+    val withDirty = masterIndex + (999 to SongPlayStatus(played = true, fullCombo = true, allPerfect = true))
+    val dirtySummary = difficultySummary("master", masterSongs, withDirty)
+    checkEq(
+        "★ 脏数据（有成绩但不在曲目表里）不会让 FC 数超过分母",
+        listOf(dirtySummary.played, dirtySummary.fullCombo, dirtySummary.allPerfect),
+        listOf(3, 2, 1),
+    )
+    checkEq("分母为 0 时比例是 0（不产生 NaN）", DifficultySummary("master", 0, 0, 0, 0).fcFraction, 0f)
+
+    checkEq(
+        "可选难度只来自数据里真的有的（easy…append 的顺序）",
+        availableDifficulties(
+            mapOf(1 to mapOf("master" to 32, "hard" to 18), 2 to mapOf("master" to 27, "append" to 36)),
+        ),
+        listOf("hard", "master", "append"),
+    )
+    checkEq("难度顺序：未知难度排在最后", difficultyOrder("append") < difficultyOrder("whatever"), true)
+    checkEq(
+        "难度顺序：easy 在最前、append 最后",
+        listOf(difficultyOrder("easy"), difficultyOrder("append")),
+        listOf(0, 5),
+    )
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))

@@ -3,6 +3,7 @@ package com.pjsk.toolbox.data.music
 import com.pjsk.toolbox.data.card.parseCharacter
 import com.pjsk.toolbox.data.db.MasterDao
 import com.pjsk.toolbox.ui.common.jsonObject
+import com.pjsk.toolbox.ui.common.intOrNull
 import com.pjsk.toolbox.ui.common.str
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -62,6 +63,32 @@ class MusicRepository(private val dao: MasterDao) {
     val characterSongIds: Flow<Map<Int, Set<Int>>> = dao.observeAll(TABLE_MUSIC_VOCALS)
         .map { rows -> buildCharacterSongIds(rows) }
         .flowOn(Dispatchers.Default)
+
+    /**
+     * 每首歌有哪些难度、各自多少级（`musicId → 难度 → playLevel`）。
+     *
+     * 「我的歌曲」用它做两件事：
+     *  1. 判断某首歌**有没有**某个难度（不能对没有 Append 的歌说它"没 AP"）；
+     *  2. 列表上显示那一难度的等级、并按等级排序（从简单的往上打）。
+     *
+     * 难度 key 统一转小写（上游是 `easy`…`append`，但大小写不做假设）。
+     * 缺 `playLevel` 的行仍保留 key、值记 0 —— 「有这一难度但不知道几级」
+     * 和「没有这一难度」是两件不同的事。
+     */
+    val difficultyLevels: Flow<Map<Int, Map<String, Int>>> =
+        dao.observeAll(TABLE_MUSIC_DIFFICULTIES)
+            .map { rows ->
+                val out = HashMap<Int, MutableMap<String, Int>>()
+                for (row in rows) {
+                    val obj = row.jsonObject() ?: continue
+                    val musicId = obj.intOrNull("musicId") ?: continue
+                    val difficulty = obj.str("musicDifficulty")?.takeIf { it.isNotBlank() } ?: continue
+                    val level = obj.intOrNull("playLevel") ?: 0
+                    out.getOrPut(musicId) { HashMap(6) }[difficulty.lowercase()] = level
+                }
+                out
+            }
+            .flowOn(Dispatchers.Default)
 
     /**
      * 载入一首歌的完整展示数据；库里没有这一首就返回 null。

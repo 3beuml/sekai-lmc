@@ -49,7 +49,8 @@ import com.pjsk.toolbox.ui.screen.GachaScreen
 import com.pjsk.toolbox.ui.screen.HomeScreen
 import com.pjsk.toolbox.ui.screen.LyricsScreen
 import com.pjsk.toolbox.ui.screen.MyPlayerScreen
-import com.pjsk.toolbox.ui.screen.MyCardsNotReady
+import com.pjsk.toolbox.ui.screen.MyMusicScreen
+import com.pjsk.toolbox.ui.common.PlayerDataGate
 import com.pjsk.toolbox.ui.screen.SongsScreen
 import com.pjsk.toolbox.ui.screen.MasterListScreen
 import com.pjsk.toolbox.ui.screen.MusicDetailScreen
@@ -90,6 +91,14 @@ object Routes {
      * 这一条路由只是「带着玩家数据进图鉴」，数据从本地快照里读。
      */
     const val MY_CARDS = "my/cards"
+
+    /**
+     * 「我的歌曲」：按难度看已打 / FC / AP，并筛出「没 FC」「没 AP」的曲目当工作清单。
+     *
+     * 同样不是新写一套歌曲列表：它复用内置谱面（难度等级）和歌曲行素材，
+     * 只是右侧从「▶ / ★」换成「等级 + 成绩徽章」，排序也换成按等级升序。
+     */
+    const val MY_MUSIC = "my/music"
 
     const val ARG_TABLE = "table"
     const val ARG_ID = "id"
@@ -372,6 +381,7 @@ fun AppNav() {
                     onUnbound = { navController.popBackStack() },
                     onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
                     onOpenMyCards = { navController.navigate(Routes.MY_CARDS) },
+                    onOpenMyMusic = { navController.navigate(Routes.MY_MUSIC) },
                 )
             }
 
@@ -386,7 +396,8 @@ fun AppNav() {
                 val acc = account
                 if (acc == null) {
                     // 直达这一屏但没绑定：给一个明确出口，不显示一张空图鉴
-                    MyCardsNotReady(
+                    PlayerDataGate(
+                        title = "我的卡牌",
                         reason = "还没有绑定账号。",
                         actionLabel = "去绑定",
                         onBack = { navController.popBackStack() },
@@ -394,7 +405,8 @@ fun AppNav() {
                 } else {
                     val ids = owned
                     if (ids == null) {
-                        MyCardsNotReady(
+                        PlayerDataGate(
+                            title = "我的卡牌",
                             reason = "本地还没有这份账号的卡牌数据，去「我的」读取一次就有了。",
                             actionLabel = "去「我的」",
                             onBack = { navController.popBackStack() },
@@ -409,6 +421,17 @@ fun AppNav() {
                         )
                     }
                 }
+            }
+
+            composable(Routes.MY_MUSIC) {
+                MyMusicScreen(
+                    region = region,
+                    onBack = { navController.popBackStack() },
+                    onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
+                    onOpenMyPlayer = { navController.navigate(Routes.MY_PLAYER) },
+                    // 点一首歌 → 歌曲详情（那里能看到完整成绩与演唱版本）
+                    onOpenDetail = { musicId -> navController.navigate(Routes.musicDetail(musicId)) },
+                )
             }
 
             composable(Routes.BIND_ACCOUNT) {
