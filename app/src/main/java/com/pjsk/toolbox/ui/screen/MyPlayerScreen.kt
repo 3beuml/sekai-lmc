@@ -128,6 +128,11 @@ fun MyPlayerScreen(
     val allCharacters by remember { cardRepository.characters }.collectAsState(initial = emptyList())
     val unitColors by remember { musicRepository.unitColors }.collectAsState(initial = emptyMap())
 
+    // 把快照里的原始 id 翻译成人读的东西：羁绊组名、角色专属色（都来自 master data）
+    val masterRef = remember { container.masterRefRepository }
+    val characterColors by remember { masterRef.characterColors }.collectAsState(initial = emptyMap())
+    val bondPairs by remember { masterRef.bondPairs }.collectAsState(initial = emptyMap())
+
     var snapshot by remember(account) { mutableStateOf(account?.let { repo.loadCached(it) }) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -283,7 +288,10 @@ fun MyPlayerScreen(
                                     character = charsById[owned.characterId],
                                     nameLanguage = nameLanguage,
                                     region = region,
-                                    accent = unitColorOf(charsById[owned.characterId], unitColors) ?: accent,
+                                    // 优先用这个角色自己的官方主题色（gameCharacterUnits.colorCode），
+                                    // 取不到才退回队长卡所在单位的色 —— 这样 26 格是 26 种颜色，
+                                    // 而不是"同团 4 人同色"。
+                                    accent = parseHexColor(characterColors[owned.characterId]) ?: accent,
                                 )
                             }
                             repeat(6 - rowChars.size) { Spacer(Modifier.width(48.dp)) }
@@ -298,24 +306,20 @@ fun MyPlayerScreen(
                 if (bonds.isEmpty()) {
                     HintText("快照里没有羁绊数据。")
                 } else {
-                    HintText("共 ${bonds.size} 组 · 内置数据里没有羁绊组的名称表，只能显示组 id")
-                    Spacer(Modifier.height(6.dp))
                     val shown = bonds.take(8)
                     val maxRank = shown.maxOf { it.rank }.coerceAtLeast(1)
-                    shown.forEach { bond -> BondBarRow(bond, maxRank) }
+                    shown.forEach { bond ->
+                        val pair = bondPairs[bond.bondsGroupId]
+                        // 组名靠 master data 翻译（bonds.json + gameCharacterUnits），
+                        // 表没下全时退回组 id —— 但绝不显示成"什么都不是"。
+                        val label = bondLabel(pair, charsById, nameLanguage)
+                            ?: "#${bond.bondsGroupId}"
+                        BondBarRow(label = label, rank = bond.rank, maxRank = maxRank)
+                    }
                     if (bonds.size > shown.size) {
                         HintText("其余 ${bonds.size - shown.size} 组按等级排在后面")
                     }
                 }
-            }
-
-            CardModule("资源") {
-                val mats = materialStats(snap.materials)
-                TripleStat(
-                    a = "材料种类" to "${mats.kinds}",
-                    b = "持有中" to "${mats.nonZeroKinds}",
-                    c = "数量合计" to "%,d".format(mats.totalQuantity),
-                )
             }
 
             Spacer(Modifier.height(4.dp))
@@ -533,16 +537,33 @@ private fun MusicBarRow(stat: DifficultyStat, max: Int, accent: Color) {
 }
 
 @Composable
-private fun BondBarRow(bond: OwnedBond, maxRank: Int) {
+private fun BondBarRow(label: String, rank: Int, maxRank: Int) {
     BarRow(
-        label = "${bond.bondsGroupId}",
-        fraction = bond.rank.toFloat() / maxRank,
+        label = label,
+        fraction = rank.toFloat() / maxRank,
         color = MaterialTheme.colorScheme.tertiary,
-        valueText = "Lv.${bond.rank}",
+        valueText = "Lv.$rank",
+        labelWidth = 120,
     )
 }
 
-/** 一个角色格：头像 + 等级，底色用该角色所属单位的官方色。 */
+/**
+ * 羁绊组名：「一歌 & 穗波」。拿不到就返回 null（调用方退回显示组 id）。
+ *
+ * 名字跟随 App 的「名称语言」设置，和卡牌页、剧情页一致。
+ */
+private fun bondLabel(
+    pair: com.pjsk.toolbox.data.profile.BondPair?,
+    charsById: Map<Int, PjskCharacter>,
+    nameLanguage: NameLanguage,
+): String? {
+    if (pair == null) return null
+    val a = charsById[pair.characterIdSmall]?.displayNameFor(nameLanguage) ?: return null
+    val b = charsById[pair.characterIdLarge]?.displayNameFor(nameLanguage) ?: return null
+    return "$a & $b"
+}
+
+/** 一个角色格：**圆角方形** + 头像 + 等级，底色用该角色自己的官方主题色。 */
 @Composable
 private fun CharacterCell(
     owned: OwnedCharacter,
@@ -557,8 +578,8 @@ private fun CharacterCell(
     ) {
         Box(
             modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
+                .size(44.dp)
+                .clip(RoundedCornerShape(10.dp))
                 .background(accent.copy(alpha = 0.30f)),
             contentAlignment = Alignment.Center,
         ) {
@@ -566,6 +587,9 @@ private fun CharacterCell(
                 model = AssetUrls.characterAvatar(region, owned.characterId),
                 contentDescription = character?.displayNameFor(nameLanguage),
                 contentScale = ContentScale.Crop,
+                // ⚠️ 这张图实测是 376×840 的**竖版立绘**，居中裁只会截到躯干。
+                // 顶部对齐后 44dp 的方框里看到的是头部，这才是"头像"。
+                alignment = Alignment.TopCenter,
                 modifier = Modifier.fillMaxSize(),
             )
         }

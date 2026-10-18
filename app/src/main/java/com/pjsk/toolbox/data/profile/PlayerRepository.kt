@@ -108,6 +108,10 @@ class PlayerRepository(
          * 不带也能读全（但响应会有几百 KB）。少要一点对上游的服务也更客气。
          */
         private const val KEYS = "userGamedata,userCards,userMusicResults,userMaterials," +
-            "userProfile,userDecks,userCharacters,userBonds,userChallengeLiveSoloStages,upload_time"
+            "userProfile,userDecks,userCharacters,userBonds,userChallengeLiveSoloStages,upload_time," +
+            // ⚠️ 区域道具与称号现在是「我的」页还没用、但下一批（综合力）必需的：
+            // 少要这两个 key，将来算出来的区域道具/称号分项会恒为 0，而界面看起来完全正常
+            // —— 这是本轮最容易踩的静默错误的坑，所以**提前要上**。
+            "userAreas,userHonors"
     }
 }

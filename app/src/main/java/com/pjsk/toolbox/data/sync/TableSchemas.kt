@@ -87,6 +87,10 @@ object TableSchemas {
             },
         ),
         TableSchema("gameCharacterUnits.json", nameKeys = listOf("name", "title")),
+        // 羁绊组。字段 id / groupId / characterId1 / characterId2，**有 `id`**，默认主键即可。
+        // ⚠️ characterId1/2 是 gameCharacterUnits.id（style id），不是 gameCharacterId；
+        //    翻译组名时必须先映射回基础角色，否则虚拟歌手(21–26)全会被认成同一个人。
+        TableSchema("bonds.json"),
         // ⚠️ 没有 id 字段。实测字段：characterId, characterVoice, birthday, height, school,
         // schoolYear, hobby, specialSkill, favoriteFood, hatedFood, weak, introduction, scenarioId。
         // 主键退回 characterId —— 实测 26 行 26 个唯一值，安全。

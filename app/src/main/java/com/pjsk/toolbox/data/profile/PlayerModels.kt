@@ -253,6 +253,97 @@ fun sortCharacters(chars: List<OwnedCharacter>): List<OwnedCharacter> =
     chars.sortedWith(compareByDescending<OwnedCharacter> { it.characterRank }.thenBy { it.characterId })
 
 // ─────────────────────────────────────────────────────────────
+// 羁绊组名（`bonds.json` + `gameCharacterUnits.json`）
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * `bonds.json` 的一行。
+ *
+ * ⚠️ **`characterId1/2` 是 `gameCharacterUnits.id`（1..56 的 style id），不是 `gameCharacterId`。**
+ * 虚拟歌手（21–26）每人有 6 个 style（如 21 = piapro 本体，27–31 = 五个团的版本），
+ * 直接当角色 id 用会把 21–26 全显示成同一个人、27–56 查不到名字。
+ * 所以必须先经 [parseStyleToBase] 映射回基础角色。
+ */
+data class BondRow(val id: Int, val groupId: Int, val characterId1: Int, val characterId2: Int)
+
+/** 一个羁绊组对应的两个**基础**角色（已排序：小 id 在前）。 */
+data class BondPair(val groupId: Int, val characterIdSmall: Int, val characterIdLarge: Int)
+
+/**
+ * 羁绊 groupId 的编码规律：`10000 + 100 × 小 + 大`。
+ *
+ * 依据：`bonds.json` 全部 890 行按此式反算，把 style id 映射回基础角色后 **890/890 全中**；
+ * 且 325 个不同的 groupId 恰好等于 C(26,2) = 325，每组只对应唯一角色对。
+ * （不做映射时只有 325/890 命中 —— 这恰好反证了必须归一。）
+ */
+fun bondGroupIdOf(characterIdA: Int, characterIdB: Int): Int =
+    10_000 + 100 * minOf(characterIdA, characterIdB) + maxOf(characterIdA, characterIdB)
+
+/**
+ * 把 `bonds.json` 的行 + style → 基础角色 的映射，压成 `groupId → 角色对`。
+ *
+ * 同一组在表里有多行（两个方向、以及虚拟歌手的多个 style 组合），这里只保留第一行，
+ * 并且**统一按 min/max 排序**，保证界面文字顺序稳定（不随上游行序跳）。
+ */
+fun resolveBondPairs(rows: List<BondRow>, styleToBase: Map<Int, Int>): Map<Int, BondPair> {
+    val out = LinkedHashMap<Int, BondPair>(rows.size / 2 + 1)
+    for (row in rows) {
+        val a = styleToBase[row.characterId1] ?: continue
+        val b = styleToBase[row.characterId2] ?: continue
+        val small = minOf(a, b)
+        val large = maxOf(a, b)
+        out.getOrPut(row.groupId) { BondPair(row.groupId, small, large) }
+    }
+    return out
+}
+
+/** 解析 `bonds.json` 的行（容错：缺字段的行跳过）。 */
+fun parseBondRows(jsonRows: List<String>): List<BondRow> = jsonRows.mapNotNull { raw ->
+    val o = runCatching { lenientJson.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return@mapNotNull null
+    val id = o.int("id")
+    val groupId = o.int("groupId")
+    val c1 = o.int("characterId1")
+    val c2 = o.int("characterId2")
+    if (id <= 0 || groupId <= 0 || c1 <= 0 || c2 <= 0) return@mapNotNull null
+    BondRow(id = id, groupId = groupId, characterId1 = c1, characterId2 = c2)
+}
+
+/**
+ * 解析 `gameCharacterUnits.json` 的 style → 基础角色映射。
+ *
+ * 同一 `gameCharacterId` 会有多行（虚拟歌手的多个 style），这里每行都写进 map，
+ * 因为它们各自的 `id` 都要能映射回同一个基础角色。
+ */
+fun parseStyleToBase(jsonRows: List<String>): Map<Int, Int> {
+    val out = HashMap<Int, Int>(jsonRows.size * 2)
+    for (raw in jsonRows) {
+        val o = runCatching { lenientJson.parseToJsonElement(raw).jsonObject }.getOrNull() ?: continue
+        val id = o.int("id")
+        val base = o.int("gameCharacterId")
+        if (id > 0 && base > 0) out[id] = base
+    }
+    return out
+}
+
+/**
+ * 解析 `gameCharacterUnits.json` 里**每个角色的官方主题色**。
+ *
+ * ⚠️ 这就是「角色专属色」的数据源 —— 之前（§16.6）写"内置表里没有角色专属色"是**错的**，
+ * `gameCharacterUnits.colorCode` 每个角色都有（实测一歌 `#33aaee`、咲希 `#ffdd44`）。
+ * 虚拟歌手的多个 style 颜色相同，取任意一行即可。
+ */
+fun parseCharacterColors(jsonRows: List<String>): Map<Int, String> {
+    val out = HashMap<Int, String>(64)
+    for (raw in jsonRows) {
+        val o = runCatching { lenientJson.parseToJsonElement(raw).jsonObject }.getOrNull() ?: continue
+        val base = o.int("gameCharacterId")
+        val color = o.str("colorCode")
+        if (base > 0 && !color.isNullOrBlank()) out.putIfAbsent(base, color)
+    }
+    return out
+}
+
+// ─────────────────────────────────────────────────────────────
 // 解析（纯函数，可断言）
 // ─────────────────────────────────────────────────────────────
 

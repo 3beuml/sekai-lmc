@@ -9,6 +9,7 @@ import com.pjsk.toolbox.data.music.MusicRepository
 import com.pjsk.toolbox.data.settings.AppSettings
 import com.pjsk.toolbox.data.player.MusicPlayer
 import com.pjsk.toolbox.data.player.MusicPlayerFactory
+import com.pjsk.toolbox.data.profile.MasterRefRepository
 import com.pjsk.toolbox.data.profile.PlayerRepository
 import com.pjsk.toolbox.data.remote.MasterRepository
 import com.pjsk.toolbox.data.remote.MirrorFallbackInterceptor
@@ -148,6 +149,15 @@ class AppContainer(private val context: Context) {
      */
     val playerRepository: PlayerRepository by lazy {
         PlayerRepository(appContext, httpClient)
+    }
+
+    /**
+     * 把玩家快照里的原始 id 翻译成人读的东西（羁绊组名、角色专属色）。
+     *
+     * 与 [playerRepository] 分工：那个管联网与快照，这个只读 master data。
+     */
+    val masterRefRepository: MasterRefRepository by lazy {
+        MasterRefRepository(database.masterDao())
     }
 
     /** 内置数据快照（打包在 APK 的 assets 里）。 */

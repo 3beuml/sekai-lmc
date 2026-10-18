@@ -127,6 +127,7 @@ import com.pjsk.toolbox.data.remote.DataModule
 import com.pjsk.toolbox.data.remote.MasterRepository
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.profile.PlayerAccount
+import com.pjsk.toolbox.data.profile.bondGroupIdOf
 import com.pjsk.toolbox.data.profile.cardStats
 import com.pjsk.toolbox.data.profile.difficultyLabel
 import com.pjsk.toolbox.data.profile.isValidGameId
@@ -135,7 +136,11 @@ import com.pjsk.toolbox.data.profile.musicStats
 import com.pjsk.toolbox.data.profile.UNKNOWN_RARITY
 import com.pjsk.toolbox.data.profile.OwnedCard
 import com.pjsk.toolbox.data.profile.normalizeGameId
+import com.pjsk.toolbox.data.profile.parseBondRows
+import com.pjsk.toolbox.data.profile.parseCharacterColors
 import com.pjsk.toolbox.data.profile.parseSnapshot
+import com.pjsk.toolbox.data.profile.parseStyleToBase
+import com.pjsk.toolbox.data.profile.resolveBondPairs
 import com.pjsk.toolbox.data.profile.rarityDistribution
 import com.pjsk.toolbox.data.profile.rarityLabel
 import com.pjsk.toolbox.data.profile.sortBonds
@@ -2429,7 +2434,7 @@ fun main(args: Array<String>) {
             val file = row.stringValue("file") ?: return@mapNotNull null
             Triple(file, row.intValue("rows") ?: 0, (row.stringValue("bytes")?.toLongOrNull() ?: 0L))
         }
-        check("清单里有 66 张表", entries.size == 66, "实际=${entries.size}")
+        check("清单里有 67 张表", entries.size == 67, "实际=${entries.size}")
 
         val sorted = entries.sortedWith(
             compareBy(
@@ -2454,7 +2459,7 @@ fun main(args: Array<String>) {
         val p2Bytes = p2.map { name -> entries.first { it.first == name }.third }
         check("P2 段按体积升序（小表先完成，进度条动得快）",
             p2Bytes.zipWithNext().all { (a, b) -> a <= b }, "体积序列前 8 项=${p2Bytes.take(8)}")
-        check("清单里 66 张表都排进去了", sorted.size == 66)
+        check("清单里 67 张表都排进去了", sorted.size == 67)
     }
 
     section("在线同步顺序：卡牌 / 歌曲在前，卡池垫底")
@@ -2741,6 +2746,87 @@ fun main(args: Array<String>) {
     // 顶层没有 userGamedata → 不是一份可用快照，返回 null 而不是抛异常
     check("没有 userGamedata 时返回 null 而不是崩", parseSnapshot("""{"upload_time":1}""", account) == null)
     check("完全不是 JSON 时返回 null", parseSnapshot("not json", account) == null)
+
+    // ─────────────────────────────────────────────────────────
+    section("23. 羁绊组名 / 角色专属色（bonds.json + gameCharacterUnits）")
+
+    // 编码规律：groupId = 10000 + 100×小 + 大
+    checkEq("groupId(1,3) = 10103", bondGroupIdOf(1, 3), 10103)
+    checkEq("groupId 与参数顺序无关", bondGroupIdOf(3, 1), 10103)
+    checkEq("groupId(21,26) = 12126", bondGroupIdOf(26, 21), 12126)
+
+    // style → 基础角色：虚拟歌手每人 6 个 style，必须都映射回同一个人
+    val unitRows = listOf(
+        """{"id":1,"gameCharacterId":1,"unit":"light_sound","colorCode":"#33aaee"}""",
+        """{"id":21,"gameCharacterId":21,"unit":"piapro","colorCode":"#33ccbb"}""",
+        """{"id":27,"gameCharacterId":21,"unit":"light_sound","colorCode":"#33ccbb"}""",
+        """{"id":3,"gameCharacterId":3,"unit":"light_sound","colorCode":"#ee6666"}""",
+    )
+    val styleToBase = parseStyleToBase(unitRows)
+    checkEq("style→基础角色条数", styleToBase.size, 4)
+    checkEq("虚拟歌手的两个 style 都映射到 21", listOf(styleToBase[21], styleToBase[27]), listOf(21, 21))
+
+    val colors = parseCharacterColors(unitRows)
+    checkEq("角色专属色：一歌", colors[1], "#33aaee")
+    checkEq("角色专属色：同角色的多个 style 不覆盖成别的", colors[21], "#33ccbb")
+    checkEq("角色专属色条数（按基础角色去重）", colors.size, 3)
+
+    // 同一组给多行（正反 + 虚拟歌手多 style）→ 压成一条，且按 min/max 归一
+    val bondRows = parseBondRows(
+        listOf(
+            """{"id":1,"groupId":10103,"characterId1":1,"characterId2":3}""",
+            """{"id":2,"groupId":10103,"characterId1":3,"characterId2":1}""",
+            """{"id":3,"groupId":10121,"characterId1":1,"characterId2":21}""",
+            """{"id":4,"groupId":10121,"characterId1":1,"characterId2":27}""",
+            """{"groupId":1050,"characterId1":1}""",
+        ),
+    )
+    checkEq("缺字段的行被丢掉（5 行 → 4 行）", bondRows.size, 4)
+    val bondPairs = resolveBondPairs(bondRows, styleToBase)
+    checkEq("同一组多行压成 1 条（10103 与 10121 共 2 组）", bondPairs.size, 2)
+    checkEq(
+        "10103 → 一歌 & 穂波（归一成小 id 在前）",
+        bondPairs[10103]?.let { "${it.characterIdSmall},${it.characterIdLarge}" },
+        "1,3",
+    )
+    checkEq(
+        "10121 的两种 style 写法归到同一对角色",
+        bondPairs[10121]?.let { "${it.characterIdSmall},${it.characterIdLarge}" },
+        "1,21",
+    )
+
+    // ★ 用**真实快照**验编码规律：890 行全部满足 groupId = 10000+100×小+大
+    run {
+        val bondsFile = File(packDir, "bonds.json")
+        val unitsFile = File(packDir, "gameCharacterUnits.json")
+        check("快照里有 bonds.json", bondsFile.isFile, bondsFile.absolutePath)
+        if (bondsFile.isFile && unitsFile.isFile) {
+            val realBonds = parseBondRows(
+                json.parseToJsonElement(bondsFile.readText()).jsonArray.map { it.toString() },
+            )
+            val realStyle = parseStyleToBase(
+                json.parseToJsonElement(unitsFile.readText()).jsonArray.map { it.toString() },
+            )
+            check("bonds.json 行数 > 800", realBonds.size > 800, "实际 ${realBonds.size}")
+            check("gameCharacterUnits 有 56 个 style", realStyle.size == 56, "实际 ${realStyle.size}")
+            val realPairs = resolveBondPairs(realBonds, realStyle)
+            checkEq("★ 325 组羁绊（= C(26,2) 闭合）", realPairs.size, 325)
+            val bad = realBonds.filter { row ->
+                val p = realPairs[row.groupId] ?: return@filter true
+                bondGroupIdOf(p.characterIdSmall, p.characterIdLarge) != row.groupId
+            }
+            check(
+                "★ 全部 ${realBonds.size} 行满足 groupId = 10000+100×小+大",
+                bad.isEmpty(),
+                bad.take(3).joinToString("；") { "group=${it.groupId} c=(${it.characterId1},${it.characterId2})" },
+            )
+            checkEq(
+                "真实快照里 10103 是一歌 & 穂波",
+                realPairs[10103]?.let { "${it.characterIdSmall},${it.characterIdLarge}" },
+                "1,3",
+            )
+        }
+    }
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))

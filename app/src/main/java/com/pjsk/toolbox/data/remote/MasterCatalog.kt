@@ -146,6 +146,11 @@ object TableCatalog {
         TableSpec("characterProfiles.json", DataModule.CHARACTER, 19_130L, cnOverlay = true),
         TableSpec("character2ds.json", DataModule.CHARACTER, 112_555L),
         TableSpec("characterRanks.json", DataModule.CHARACTER, 1_174_467L),
+        // 羁绊组：`userBonds` 只给 bondsGroupId，要靠这张表翻译成「一歌 & 穗波」。
+        // 实测 890 行 / 82,106 B，字段 id / groupId / characterId1 / characterId2。
+        // ⚠️ characterId1/2 是 **gameCharacterUnits.id（1..56 的 style id）**，不是 gameCharacterId，
+        //    必须经 gameCharacterUnits 映射回基础角色（虚拟歌手每人有 6 个 style）。
+        TableSpec("bonds.json", DataModule.CHARACTER, 82_106L),
 
         // ── 音乐 ────────────────────────────────────────────────
         TableSpec("limitedTimeMusics.json", DataModule.MUSIC, 785L, cnOverlay = true),

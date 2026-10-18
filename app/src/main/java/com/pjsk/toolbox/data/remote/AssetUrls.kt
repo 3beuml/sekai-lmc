@@ -294,13 +294,23 @@ object AssetUrls {
     }
 
     /**
-     * **角色头像**（正脸小图）。实测路径是 `character/character_select/chr_tl_<角色id>.webp`。
+     * **角色立绘**（竖版）。实测路径是 `character/character_select/chr_tl_<角色id>.webp`。
      *
      * ⚠️ 注意是 `chr_tl_`，而且**没有子目录** —— 函数签名里那个 `assetbundleName` 参数
-     * （[characterImage]）拼出来的形状是错的、会 404。头像只需要**角色 id**。
+     * （[characterImage]）拼出来的形状是错的、会 404。这里只需要**角色 id**。
+     *
+     * ⚠️⚠️ **实测尺寸是 376×840（高宽比 2.23）的竖版立绘，不是脸图。**
+     * 当"头像"用时必须裁剪：圆形 + 居中裁只会截到躯干（2026-10-16 真机反馈"看不到脸"），
+     * 正确做法是**圆角方形 + 顶部对齐裁切**（`ContentScale.Crop` + `Alignment.TopCenter`）。
+     * 资产桶里**没有**现成的正方形脸图（`character/` 下 17 个子目录全是立绘/名字/剪影类，
+     * `character_icon/` 只有联动子目录）。
+     *
+     * **走镜像**（和 [cardIcon] 一致）：官方 CDN 实测 1318 ms 且经常超时，
+     * 镜像 182 ms —— 26 张图一起加载时这是"只出来一部分"的直接原因。
+     * 镜像缺文件时由 `MirrorFallbackInterceptor` 自动回退官方。
      */
     fun characterAvatar(region: ServerRegion, characterId: Int): String =
-        "${region.assetBase}/character/character_select/chr_tl_$characterId.webp"
+        "${mirrorAssetBase(region)}/character/character_select/chr_tl_$characterId.webp"
 
     /** 活动剧情的一话截图（16:9）。实测 `event_story/<b>/episode_image/<b>_NN.webp`。 */
     fun eventEpisodeImage(region: ServerRegion, assetbundleName: String, episodeNo: Int): String {
