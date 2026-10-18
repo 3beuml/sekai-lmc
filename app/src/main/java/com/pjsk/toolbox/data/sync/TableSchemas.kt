@@ -1,4 +1,4 @@
-﻿package com.pjsk.toolbox.data.sync
+package com.pjsk.toolbox.data.sync
 
 import kotlinx.serialization.json.JsonObject
 
@@ -104,6 +104,11 @@ object TableSchemas {
         // 突破固定加成（25 行）。主键是 (cardRarityType, masterRank) —— 没有 id，
         // 裁剪器会把 masterRank 当主键兜底（同一稀有度的 5 个等级各自一行，不会撞）。
         TableSchema("masterLessons.json", nameKeys = listOf("cardRarityType")),
+        // 每首歌 × 每个难度的分数/PT 系数（社区产物，不在 sekai-master-db 仓库里）。
+        // 行由 (music_id, difficulty) 唯一确定、**没有 id** —— 裁剪器造 `id = musicId×10 + 难度序号`
+        // （见 RowProjectors.MUSIC_METAS）。主键因此用默认的 `id`。
+        // 没有任何 name/title 字段，所以 nameKeys 取不到名字：这张表不进列表界面。
+        TableSchema("musicMetas.json"),
         // 区域定义（27 行）：id + name。
         TableSchema("areas.json", nameKeys = listOf("name")),
         // ⚠️ 没有 id 字段。实测字段：characterId, characterVoice, birthday, height, school,

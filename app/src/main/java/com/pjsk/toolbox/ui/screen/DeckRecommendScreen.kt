@@ -11,12 +11,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -30,27 +33,33 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -60,12 +69,16 @@ import com.pjsk.toolbox.data.AppContainer
 import com.pjsk.toolbox.data.card.Card
 import com.pjsk.toolbox.data.card.PjskCharacter
 import com.pjsk.toolbox.data.card.displayNameFor
+import com.pjsk.toolbox.data.db.AppDatabase
+import com.pjsk.toolbox.data.db.MasterRowEntity
 import com.pjsk.toolbox.data.deck.DeckEngine
+import com.pjsk.toolbox.data.deck.DeckLiveType
 import com.pjsk.toolbox.data.deck.DeckRecommendResult
+import com.pjsk.toolbox.data.deck.DeckTarget
 import com.pjsk.toolbox.data.deck.RecommendedCard
 import com.pjsk.toolbox.data.deck.RecommendedDeck
 import com.pjsk.toolbox.data.deck.buildMasterDataPayload
-import com.pjsk.toolbox.data.deck.buildPowerParams
+import com.pjsk.toolbox.data.deck.buildRecommendParams
 import com.pjsk.toolbox.data.deck.buildUserJson
 import com.pjsk.toolbox.data.deck.parseDeckRecommendResult
 import com.pjsk.toolbox.data.deck.restoreAreaItemLevelsJson
@@ -73,6 +86,7 @@ import com.pjsk.toolbox.data.deck.restoreAreaItemsJson
 import com.pjsk.toolbox.data.deck.restoreCardsJson
 import com.pjsk.toolbox.data.deck.restoreHonorsJson
 import com.pjsk.toolbox.data.deck.restoreMasterLessonsJson
+import com.pjsk.toolbox.data.deck.restoreMusicMetasJson
 import com.pjsk.toolbox.data.profile.AreaItemLevelRow
 import com.pjsk.toolbox.data.profile.OwnedCard
 import com.pjsk.toolbox.data.profile.PlayerSnapshot
@@ -81,6 +95,7 @@ import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.settings.NameLanguage
 import com.pjsk.toolbox.ui.common.PlayerDataGate
+import com.pjsk.toolbox.ui.common.displayName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -174,16 +189,60 @@ fun DeckRecommendScreen(
     /** 装载链跑了几次（诊断用：正常应该正好 1，重建后 +1）。 */
     var chainRuns by rememberSaveable { mutableStateOf(0) }
 
+    // ── 模式与输入（三个目标 × 两种玩法）──
+    //
+    // 选择项全部用 rememberSaveable 存：转屏/重建之后，**必须**让界面上的选择
+    // 与"已经显示着的那份结果"对得上。用 remember 的话，重建后选择回到默认的
+    // 「综合力」，而屏幕下方还挂着上次「分数」的结果 —— 那是最容易误导人的状态。
+    var targetKey by rememberSaveable { mutableStateOf(DeckTarget.POWER.key) }
+    var liveKey by rememberSaveable { mutableStateOf(DeckLiveType.SOLO.key) }
+    var eventId by rememberSaveable { mutableStateOf<Int?>(null) }
+    var eventLabel by rememberSaveable { mutableStateOf("") }
+    var musicId by rememberSaveable { mutableStateOf<Int?>(null) }
+    var musicLabel by rememberSaveable { mutableStateOf("") }
+    var musicDiff by rememberSaveable { mutableStateOf("expert") }
+    var teammatePower by rememberSaveable { mutableStateOf("") }
+    var teammateScoreUp by rememberSaveable { mutableStateOf("") }
+    /** 「重新推荐」/「重新载入」用来强制重跑搜索（LaunchedEffect 只认 key 变化）。 */
+    var searchToken by remember { mutableStateOf(0) }
+
+    val target = DeckTarget.entries.firstOrNull { it.key == targetKey } ?: DeckTarget.POWER
+    val liveType = DeckLiveType.entries.firstOrNull { it.key == liveKey } ?: DeckLiveType.SOLO
+    // 输入齐不齐决定「能不能搜」：缺活动的加成、缺曲目的分数都不该去问引擎 ——
+    // 那会让引擎按兜底表算出一个看起来正常、实际不对的数字。
+    val inputsReady = when (target) {
+        DeckTarget.POWER -> true
+        DeckTarget.BONUS -> eventId != null
+        DeckTarget.SCORE -> musicId != null
+    }
+
     fun runRecommend(snap: PlayerSnapshot?) {
         if (snap == null) {
             stage = RecStage.Error
             errorText = "没有账号快照，先绑定并读取一次。"
             return
         }
+        if (!inputsReady) {
+            // 缺输入就不要问引擎：引擎会走兜底表，给出"看起来正常"的数字
+            stage = RecStage.Idle
+            return
+        }
         stage = RecStage.Searching
         errorText = ""
         // limit 就是「返回几套」：5 套是用户能一眼扫完的量（再多要滚很久才看得出差别）
-        engine.recommend(buildUserJson(snap), buildPowerParams(limit = RESULT_LIMIT))
+        engine.recommend(
+            buildUserJson(snap),
+            buildRecommendParams(
+                target = target,
+                liveType = liveType,
+                limit = RESULT_LIMIT,
+                eventId = eventId,
+                musicId = musicId,
+                musicDiff = musicDiff,
+                multiTeammatePower = teammatePower.trim().toIntOrNull(),
+                multiTeammateScoreUp = teammateScoreUp.trim().toIntOrNull(),
+            ),
+        )
     }
 
     LaunchedEffect(engine) {
@@ -196,9 +255,8 @@ fun DeckRecommendScreen(
                 "loaded" -> {
                     masterLoaded = true
                     masterLoading = false
-                    // masterdata 一次性解析进引擎的缓存，之后每次搜索零重复成本 ——
-                    // 所以载完就直接跑，不让用户再点一次「跑推荐」。
-                    runRecommend(snapshot)
+                    // 装完不在这里搜 —— 搜索统一由下面那个 LaunchedEffect 触发，
+                    // 否则「装完搜一次」+「模式变化再搜一次」会连成两次搜索。
                 }
                 "result" -> {
                     rawOutput = payload
@@ -227,6 +285,23 @@ fun DeckRecommendScreen(
         }
     }
 
+    // 唯一的触发点：masterdata 装好了、输入也齐了，就（重新）搜一次。
+    // 换目标 / 换玩法 / 换活动 / 换曲目 / 点「重新推荐」都会走到这里。
+    LaunchedEffect(
+        masterLoaded, searchToken,
+        targetKey, liveKey, eventId, musicId, musicDiff, teammatePower, teammateScoreUp,
+    ) {
+        if (!masterLoaded) return@LaunchedEffect
+        if (!inputsReady) {
+            // 输入不齐时把上一次的结果清掉：留着旧模式的结果会让人以为"这就是当前模式的答案"
+            result = null
+            errorText = ""
+            stage = RecStage.Idle
+            return@LaunchedEffect
+        }
+        runRecommend(snapshot)
+    }
+
     // 条件齐了就自动装 masterdata（约 10 MB 的组装 + 引擎解析，几秒）
     LaunchedEffect(load, engineReady, masterToken) {
         val ready = load as? RecLoad.Ready ?: return@LaunchedEffect
@@ -237,8 +312,8 @@ fun DeckRecommendScreen(
         chainRuns += 1
         android.util.Log.i("DeckEngineDump", "CHAIN master-load run#$chainRuns")
         val owned = ready.snapshot.cards.map { it.cardId }.toSet()
-        val file = withContext(Dispatchers.IO) { writeMasterData(container, owned) }
-        engine.loadMasterDataFile(file)
+        val files = withContext(Dispatchers.IO) { writeMasterData(container, owned) }
+        engine.loadMasterDataFile(files.master, files.musicMetas)
     }
 
     // 重建后先把上次的结果画出来（引擎还在后台重装，装完会覆盖成新结果）
@@ -307,7 +382,31 @@ fun DeckRecommendScreen(
             chainRuns = chainRuns,
             // masterdata 没装好之前按「重新推荐」只会拿到引擎的「未载入」错误，
             // 而那个错误会盖住已经显示的结果 —— 所以按钮跟着装载状态走，不跟结果走。
-            canRerun = masterLoaded && !masterLoading,
+            canRerun = masterLoaded && !masterLoading && inputsReady,
+            target = target,
+            liveType = liveType,
+            eventId = eventId,
+            eventLabel = eventLabel,
+            musicId = musicId,
+            musicLabel = musicLabel,
+            musicDiff = musicDiff,
+            teammatePower = teammatePower,
+            teammateScoreUp = teammateScoreUp,
+            inputsReady = inputsReady,
+            onPickTarget = { targetKey = it.key },
+            onPickLiveType = { liveKey = it.key },
+            onPickEvent = { id, label ->
+                eventId = id
+                eventLabel = label
+            },
+            onPickMusic = { id, label ->
+                musicId = id
+                musicLabel = label
+            },
+            onPickMusicDiff = { musicDiff = it },
+            onTeammatePower = { teammatePower = it },
+            onTeammateScoreUp = { teammateScoreUp = it },
+            database = container.database,
             onBack = onBack,
             onRetryAll = {
                 // 整条链重来：丢掉结果 → 重新装 masterdata（装完会自动再搜一次）
@@ -317,7 +416,7 @@ fun DeckRecommendScreen(
                 masterLoading = false
                 masterToken += 1
             },
-            onRerunSearch = { runRecommend(snapshot) },
+            onRerunSearch = { searchToken += 1 },
             onToggleDiag = { diagOpen = !diagOpen },
             onToggleDeck = { index ->
                 expandedDecks = if (index in expandedDecks) expandedDecks - index else expandedDecks + index
@@ -337,23 +436,13 @@ private sealed interface RecLoad {
 }
 
 /** 引擎这条链走到哪一步了（界面上就靠它决定显示哪句提示、要不要转圈）。 */
-private enum class RecStage { Booting, Ready, BuildingMaster, Searching, Done, Error }
-
-/** 目标维度。目前只有「综合力」是通的。 */
-private enum class TargetMode(val label: String, val enabled: Boolean) {
-    POWER("综合力", true),
-    EVENT_BONUS("活动加成", false),
-    SCORE("分数", false),
-}
-
-/** 玩法维度。多人要算队友加成，同样没接。 */
-private enum class LiveMode(val label: String, val enabled: Boolean) {
-    SOLO("单人", true),
-    MULTI("多人", false),
-}
+private enum class RecStage { Booting, Ready, BuildingMaster, Searching, Done, Error, Idle }
 
 /** 一次要几套结果（引擎上限 30；5 套是"一眼扫完"的量）。 */
 private const val RESULT_LIMIT = 5
+
+/** 引擎认的六个难度名，顺序与游戏里一致。 */
+private val MUSIC_DIFFICULTIES = listOf("easy", "normal", "hard", "expert", "master", "append")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -376,6 +465,24 @@ private fun RecommendContent(
     expandedDecks: Set<Int>,
     chainRuns: Int,
     canRerun: Boolean,
+    target: DeckTarget,
+    liveType: DeckLiveType,
+    eventId: Int?,
+    eventLabel: String,
+    musicId: Int?,
+    musicLabel: String,
+    musicDiff: String,
+    teammatePower: String,
+    teammateScoreUp: String,
+    inputsReady: Boolean,
+    onPickTarget: (DeckTarget) -> Unit,
+    onPickLiveType: (DeckLiveType) -> Unit,
+    onPickEvent: (Int, String) -> Unit,
+    onPickMusic: (Int, String) -> Unit,
+    onPickMusicDiff: (String) -> Unit,
+    onTeammatePower: (String) -> Unit,
+    onTeammateScoreUp: (String) -> Unit,
+    database: AppDatabase,
     onBack: () -> Unit,
     onRetryAll: () -> Unit,
     onRerunSearch: () -> Unit,
@@ -385,6 +492,8 @@ private fun RecommendContent(
     engineHost: () -> android.webkit.WebView,
 ) {
     val ownedById = remember(snapshot.cards) { snapshot.cards.associateBy { it.cardId } }
+    var showEventPicker by remember { mutableStateOf(false) }
+    var showMusicPicker by remember { mutableStateOf(false) }
     val unitOf = remember(characters) {
         { card: Card ->
             val base = characters[card.characterId]?.unitKey
@@ -426,7 +535,7 @@ private fun RecommendContent(
                     Column {
                         Text("组卡推荐", style = MaterialTheme.typography.titleLarge)
                         Text(
-                            text = "综合力 · 单人 · 基于快照，不是实时",
+                            text = "${target.label} · ${liveType.label} · 基于快照，不是实时",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -467,11 +576,26 @@ private fun RecommendContent(
             }
 
             item(key = "modes") {
-                ModeSkeletonCard()
+                ModeCard(
+                    target = target,
+                    liveType = liveType,
+                    eventLabel = eventLabel,
+                    musicLabel = musicLabel,
+                    musicDiff = musicDiff,
+                    teammatePower = teammatePower,
+                    teammateScoreUp = teammateScoreUp,
+                    onPickTarget = onPickTarget,
+                    onPickLiveType = onPickLiveType,
+                    onOpenEventPicker = { showEventPicker = true },
+                    onOpenMusicPicker = { showMusicPicker = true },
+                    onPickMusicDiff = onPickMusicDiff,
+                    onTeammatePower = onTeammatePower,
+                    onTeammateScoreUp = onTeammateScoreUp,
+                )
             }
 
             item(key = "stage") {
-                StageRow(stage, result, searchMs, errorText, onRetryAll)
+                StageRow(stage, result, searchMs, errorText, inputsReady, target, onRetryAll)
             }
 
             result?.decks?.forEachIndexed { index, deck ->
@@ -480,6 +604,7 @@ private fun RecommendContent(
                 item(key = "deck-$index") {
                     RecommendDeckCard(
                         deck = deck,
+                        target = target,
                         isExact = result.isExact,
                         timedOut = result.timedOut,
                         currentPower = currentDeckPower,
@@ -523,12 +648,177 @@ private fun RecommendContent(
             }
         }
     }
+
+    if (showEventPicker) {
+        EventPickerSheet(
+            database = database,
+            selectedId = eventId,
+            onDismiss = { showEventPicker = false },
+            onPick = { id, label ->
+                showEventPicker = false
+                onPickEvent(id, label)
+            },
+        )
+    }
+    if (showMusicPicker) {
+        MusicPickerSheet(
+            database = database,
+            selectedId = musicId,
+            onDismiss = { showMusicPicker = false },
+            onPick = { id, label ->
+                showMusicPicker = false
+                onPickMusic(id, label)
+            },
+        )
+    }
+}
+
+/**
+ * 活动选择（底部弹层）。
+ *
+ * 数据来自内置的 `events.json`（220+ 行）。**倒序**排（最新的在最上面）：
+ * 组卡几乎总是为了"现在这期活动"，让用户滚到底找新活动的设计没有意义。
+ *
+ * 不给搜索框：活动名是中/日文，键盘输入体验差；220 行滚一下比打字快。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EventPickerSheet(
+    database: AppDatabase,
+    selectedId: Int?,
+    onDismiss: () -> Unit,
+    onPick: (Int, String) -> Unit,
+) {
+    val rows by produceState(initialValue = emptyList<MasterRowEntity>()) {
+        value = withContext(Dispatchers.IO) {
+            database.masterDao().observeAll("events.json").first()
+        }
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Text(
+            "选择活动",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+        Text(
+            "加成率按活动的加成角色 / 属性算；列表按新到旧。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+        Spacer(Modifier.height(8.dp))
+        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
+            items(rows.sortedByDescending { it.id }, key = { it.id }) { row ->
+                val label = row.displayName()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(row.id, label) }
+                        .background(
+                            if (row.id == selectedId) {
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                            } else {
+                                Color.Transparent
+                            },
+                        )
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("#${row.id}", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(56.dp))
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 曲目选择（底部弹层，带搜索）。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MusicPickerSheet(
+    database: AppDatabase,
+    selectedId: Int?,
+    onDismiss: () -> Unit,
+    onPick: (Int, String) -> Unit,
+) {
+    val rows by produceState(initialValue = emptyList<MasterRowEntity>()) {
+        value = withContext(Dispatchers.IO) {
+            database.masterDao().observeAll("musics.json").first()
+        }
+    }
+    var query by remember { mutableStateOf("") }
+    val filtered = remember(rows, query) {
+        val sorted = rows.sortedByDescending { it.id }
+        if (query.isBlank()) {
+            sorted
+        } else {
+            val q = query.trim()
+            sorted.filter { it.displayName().contains(q, ignoreCase = true) || it.id.toString() == q }
+        }
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+            Text("选择曲目", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("搜索歌名或输入曲目 id") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "得分取决于这首歌的谱面系数；难度在上一屏选。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp)) {
+            items(filtered, key = { it.id }) { row ->
+                val label = row.displayName()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(row.id, label) }
+                        .background(
+                            if (row.id == selectedId) {
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                            } else {
+                                Color.Transparent
+                            },
+                        )
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("#${row.id}", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(56.dp))
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
 }
 
 /** 顶部那句「基于快照，不是实时」—— 连同快照的时间一起说清。 */
 @Composable
-private fun SnapshotNote(snapshot: PlayerSnapshot) {
-    Row(
+private fun SnapshotNote(snapshot: PlayerSnapshot) {    Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
@@ -553,59 +843,192 @@ private fun SnapshotNote(snapshot: PlayerSnapshot) {
 }
 
 /**
- * 模式骨架。
+ * 模式与输入。
  *
- * 只有「综合力 × 单人」是通的，其余**置灰且点不动**，并在下面写清为什么 ——
- * 一个能点但没反应的 chip 比灰掉的更糟：用户会以为是自己点错了。
+ * 三个目标各自的**必需输入**不同，所以这一块会随选择变形：
+ *  - 综合力：什么都不用选（完全离线）。
+ *  - 活动加成：必须选一个活动 —— 加成率是按活动的加成角色/属性算的。
+ *  - 分数：必须选曲目与难度；再给活动 id 才会顺带算活动 PT。
+ *
+ * 为什么不把「缺输入」做成可以点下去再说：引擎在没有上下文时会用兜底表，
+ * 给出一个数值合理但语义不对的结果，而界面上看不出区别。
  */
 @Composable
-private fun ModeSkeletonCard() {
+private fun ModeCard(
+    target: DeckTarget,
+    liveType: DeckLiveType,
+    eventLabel: String,
+    musicLabel: String,
+    musicDiff: String,
+    teammatePower: String,
+    teammateScoreUp: String,
+    onPickTarget: (DeckTarget) -> Unit,
+    onPickLiveType: (DeckLiveType) -> Unit,
+    onOpenEventPicker: () -> Unit,
+    onOpenMusicPicker: () -> Unit,
+    onPickMusicDiff: (String) -> Unit,
+    onTeammatePower: (String) -> Unit,
+    onTeammateScoreUp: (String) -> Unit,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
         ),
     ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("目标", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(32.dp))
-                TargetMode.entries.forEach { mode ->
+                DeckTarget.entries.forEach { mode ->
                     FilterChip(
-                        selected = mode == TargetMode.POWER,
-                        enabled = mode.enabled,
-                        // 只有一档能选，点它什么也不做 —— 假装能切换反而会被当成坏了
-                        onClick = {},
+                        selected = mode == target,
+                        onClick = { onPickTarget(mode) },
                         label = { Text(mode.label) },
                     )
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("玩法", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(32.dp))
-                LiveMode.entries.forEach { mode ->
+                DeckLiveType.entries.forEach { mode ->
                     FilterChip(
-                        selected = mode == LiveMode.SOLO,
-                        enabled = mode.enabled,
-                        onClick = {},
+                        selected = mode == liveType,
+                        onClick = { onPickLiveType(mode) },
                         label = { Text(mode.label) },
                     )
                 }
             }
-            Text(
-                "活动加成（要选活动）、分数与多人（要曲目系数）还没接入，灰掉的格子是故意的。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+
+            when (target) {
+                DeckTarget.POWER -> Text(
+                    "纯综合力最优：不需要活动或曲目，完全离线。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                DeckTarget.BONUS, DeckTarget.SCORE -> {
+                    // 活动：bonus 必需；score 可选（选了才算活动 PT）
+                    PickerRow(
+                        label = "活动",
+                        value = eventLabel.ifBlank { if (target == DeckTarget.BONUS) "必选" else "不选（只算得分）" },
+                        emphasised = eventLabel.isBlank() && target == DeckTarget.BONUS,
+                        onClick = onOpenEventPicker,
+                    )
+                }
+            }
+
+            if (target == DeckTarget.SCORE) {
+                PickerRow(
+                    label = "曲目",
+                    value = musicLabel.ifBlank { "必选" },
+                    emphasised = musicLabel.isBlank(),
+                    onClick = onOpenMusicPicker,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("难度", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(32.dp))
+                    MUSIC_DIFFICULTIES.forEach { diff ->
+                        FilterChip(
+                            selected = diff == musicDiff,
+                            onClick = { onPickMusicDiff(diff) },
+                            label = { Text(diff) },
+                        )
+                    }
+                }
+            }
+
+            if (target == DeckTarget.SCORE && liveType == DeckLiveType.MULTI) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("队友", style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(32.dp))
+                    SmallNumberField(
+                        value = teammatePower,
+                        onValueChange = onTeammatePower,
+                        label = "综合力",
+                        modifier = Modifier.weight(1f),
+                    )
+                    SmallNumberField(
+                        value = teammateScoreUp,
+                        onValueChange = onTeammateScoreUp,
+                        label = "技能%",
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Text(
+                    "多人得分含 4 名队友的贡献。留空就是按 0 算 —— 绝对值偏低，但同一份缺口" +
+                        "对所有候选卡组一样，所以排名仍然可比。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
 
-/** 进度 / 结果摘要 / 报错，三选一。 */
+/** 一行「标签 + 当前值 + 可点选」。 */
+@Composable
+private fun PickerRow(
+    label: String,
+    value: String,
+    emphasised: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.6f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(40.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = if (emphasised) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+        )
+        Text(
+            "选择",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+    }
+}
+
+/** 小号数字输入（多人模式的队友参数）。只收数字，空串表示"不传"。 */
+@Composable
+private fun SmallNumberField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedTextField(
+        value = value,
+        // 只留数字：引擎只认整数，带逗号/小数会被静默截断成 0
+        onValueChange = { text -> onValueChange(text.filter { it.isDigit() }.take(9)) },
+        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+        singleLine = true,
+        textStyle = MaterialTheme.typography.bodySmall,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = modifier,
+    )
+}
+
+/** 进度 / 结果摘要 / 待选输入 / 报错。 */
 @Composable
 private fun StageRow(
     stage: RecStage,
     result: DeckRecommendResult?,
     searchMs: Int,
     errorText: String,
+    inputsReady: Boolean,
+    target: DeckTarget,
     onRetryAll: () -> Unit,
 ) {
     val busy = stage == RecStage.Booting || stage == RecStage.BuildingMaster || stage == RecStage.Searching
@@ -623,6 +1046,20 @@ private fun StageRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        return
+    }
+
+    // 输入没齐：明说还差什么，而不是给一个空白页让人猜
+    if (!inputsReady) {
+        Text(
+            text = when (target) {
+                DeckTarget.BONUS -> "先在上面选一个活动 —— 加成率是按活动的加成角色/属性算的。"
+                DeckTarget.SCORE -> "先在上面选一首曲目 —— 得分要用这首歌的谱面系数。"
+                DeckTarget.POWER -> ""
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         return
     }
 
@@ -670,6 +1107,7 @@ private fun StageRow(
 @Composable
 private fun RecommendDeckCard(
     deck: RecommendedDeck,
+    target: DeckTarget,
     isExact: Boolean,
     timedOut: Boolean,
     currentPower: Int?,
@@ -700,12 +1138,22 @@ private fun RecommendDeckCard(
                 RankBadge(deck.rank)
                 Spacer(Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
+                    // 主指标跟着目标变：综合力模式看综合力，加成模式看加成率，
+                    // 分数模式看得分。综合力始终作为第二行露出来 —— 它是所有模式的共同底座。
                     Text(
-                        text = "综合力 %,d".format(deck.totalPower),
+                        text = primaryMetric(deck, target),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    DiffFromCurrent(deck.totalPower, currentPower)
+                    if (target == DeckTarget.POWER) {
+                        DiffFromCurrent(deck.totalPower, currentPower)
+                    } else {
+                        Text(
+                            text = secondaryMetrics(deck, target),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 TextButton(onClick = onToggleExpand) {
                     Text(if (expanded) "收起" else "加成明细")
@@ -747,6 +1195,49 @@ private fun RecommendDeckCard(
             }
         }
     }
+}
+
+/**
+ * 一套卡组的**主指标**文案（跟着目标变）。
+ *
+ * 为什么按目标换：综合力模式盯着综合力，加成模式盯加成率，分数模式盯着单局得分。
+ * 三个数永远都在引擎输出里，但同一屏并列三个大数字只会让人不知道该看哪个。
+ *
+ * 引擎没给对应字段时显示「—」而不是 0：`target=power` 就不算 `event_bonus_total`，
+ * 显示 0% 会被当成"这套没有加成"。
+ */
+private fun primaryMetric(deck: RecommendedDeck, target: DeckTarget): String = when (target) {
+    DeckTarget.POWER -> "综合力 %,d".format(deck.totalPower)
+    DeckTarget.BONUS -> "加成 ${formatBonus(deck.eventBonusTotal)}"
+    DeckTarget.SCORE -> if (deck.liveScore >= 1.0) {
+        "得分 %,d".format(deck.liveScore.toLong())
+    } else {
+        "得分 —"
+    }
+}
+
+/** 主指标之外的次要指标（同一行，小字）。 */
+private fun secondaryMetrics(deck: RecommendedDeck, target: DeckTarget): String = buildList {
+    add("综合力 %,d".format(deck.totalPower))
+    if (target != DeckTarget.BONUS && deck.eventBonusTotal != null) {
+        add("加成 " + formatBonus(deck.eventBonusTotal))
+    }
+    if (target != DeckTarget.SCORE && deck.liveScore >= 1.0) {
+        add("得分 %,d".format(deck.liveScore.toLong()))
+    }
+    deck.eventPoint?.let { add("PT %,d".format(it)) }
+}.joinToString(" · ")
+
+/**
+ * 加成率文案。
+ *
+ * 引擎的加成按 **0.1%** 计（文档里明确写过 4.8% / 5.1% 这种半档是真实存在的），
+ * 所以整档才去掉小数，半档要显示一位 —— 截断成整数会让"230.5%"显示成"230%"。
+ * 引擎没给时显示「—」，不显示 0%（0 会被读成"这套完全没有加成"）。
+ */
+private fun formatBonus(value: Double?): String {
+    if (value == null) return "—"
+    return if (value % 1.0 == 0.0) "%d%%".format(value.toInt()) else "%.1f%%".format(value)
 }
 
 @Composable
@@ -879,7 +1370,7 @@ private fun DeckBreakdown(
                 }
                 add(episodes)
                 if (item.hasCanvasBonus) add("画布 +%,d".format(item.canvasPower))
-                item.eventBonus?.let { add("活动加成 $it%") }
+                item.eventBonus?.let { add("活动加成 " + formatBonus(it)) }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -999,6 +1490,7 @@ private fun Diagnostics(
                             RecStage.Searching -> "搜索中"
                             RecStage.Done -> "完成"
                             RecStage.Error -> "失败"
+                            RecStage.Idle -> "等输入（缺活动或曲目）"
                         },
                     )
                     result?.let {
@@ -1056,15 +1548,43 @@ private fun Diagnostics(
 // 数据侧：把快照还原成引擎要的 masterdata
 // ─────────────────────────────────────────────────────────────
 
-/** 组装 masterdata 并写到缓存文件（WebView 通过 `/masterdata.json` 取，不经过 JS 字符串）。 */
-private suspend fun writeMasterData(container: AppContainer, ownedCardIds: Set<Int>): java.io.File {
+/** 组卡引擎要的两个落盘文件（WebView 通过 `/masterdata.json` 与 `/musicMetas.json` 取）。 */
+private data class EngineFiles(val master: java.io.File, val musicMetas: java.io.File?)
+
+/**
+ * 组装 masterdata + musicMetas 并写到缓存文件。
+ *
+ * ⚠️ 两个文件都**必须**写：`musicMetas` 是引擎算「分数 / 活动 PT」的第二个入参，
+ * 缺了它引擎会退回兜底表，得分看着合理但不对（而且不会报错）。
+ */
+private suspend fun writeMasterData(container: AppContainer, ownedCardIds: Set<Int>): EngineFiles {
     return withContext(Dispatchers.IO) {
         val dir = java.io.File(container.database.openHelper.writableDatabase.path).parentFile
             .let { java.io.File(it, "deck") }
             .apply { mkdirs() }
-        val target = java.io.File(dir, "masterdata.json")
-        target.writeText(buildMasterData(container, ownedCardIds))
-        target
+        val master = java.io.File(dir, "masterdata.json")
+        master.writeText(buildMasterData(container, ownedCardIds))
+
+        val musicMetas = java.io.File(dir, "musicMetas.json")
+        val metasJson = buildMusicMetasJson(container)
+        // 空数组（库里还没有这张表 = 老用户没导入新快照）时**不注册**这个文件：
+        // 引擎会收到 "[]" 并按兜底表算，比给一个空文件更可控。
+        val musicFile = if (metasJson.length > 2) {
+            musicMetas.writeText(metasJson)
+            musicMetas
+        } else {
+            musicMetas.delete()
+            null
+        }
+        EngineFiles(master, musicFile)
+    }
+}
+
+/** 从库里读 `musicMetas` 全部行，还原成引擎第二个入参的 JSON 数组文本。 */
+private suspend fun buildMusicMetasJson(container: AppContainer): String {
+    val dao = container.database.masterDao()
+    return withContext(Dispatchers.IO) {
+        restoreMusicMetasJson(dao.observeAll("musicMetas.json").first().map { it.data })
     }
 }
 

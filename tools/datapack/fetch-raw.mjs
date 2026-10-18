@@ -32,8 +32,12 @@ const catalog = readFileSync(
   'utf8',
 );
 const specs = [...catalog.matchAll(
-  /TableSpec\(\s*"([^"]+)"\s*,\s*DataModule\.(\w+)\s*,\s*([0-9_]+)L/g,
-)].map((m) => ({ file: m[1], module: m[2], bytes: Number(m[3].replace(/_/g, '')) }));
+  /TableSpec\(\s*"([^"]+)"\s*,\s*DataModule\.(\w+)\s*,\s*([0-9_]+)L([^)]*)/g,
+)]
+  // ⚠️ `snapshotOnly = true` 的表**不在 sekai-master-db 仓库里**（musicMetas.json 来自
+  // moe.exmeaning.com），这里必须跳过，否则每张都会 404 并把整轮抓取判成失败。
+  .filter((m) => !/snapshotOnly\s*=\s*true/.test(m[4]))
+  .map((m) => ({ file: m[1], module: m[2], bytes: Number(m[3].replace(/_/g, '')) }));
 
 const args = process.argv.slice(2);
 const modules = args.length

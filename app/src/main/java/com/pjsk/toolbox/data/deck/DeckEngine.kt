@@ -1,4 +1,4 @@
-﻿package com.pjsk.toolbox.data.deck
+package com.pjsk.toolbox.data.deck
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -42,9 +42,14 @@ class DeckEngine(private val context: Context) {
 
     private var ready: CompletableDeferred<Unit>? = null
 
-    /** masterdata 的落盘文件；WebView 通过 /masterdata.json 直接取它（不经过 JS 字符串）。 */
+    /**
+     * 已注册的落盘文件：假源下的路径 → 本地文件。
+     *
+     * 目前有 `masterdata.json`（约 10 MB）与可选的 `musicMetas.json`（约 2.4 MB）。
+     * 为什么走这条路而不是把 JSON 塞进 `evaluateJavascript`：见类注释与 §17.2。
+     */
     @Volatile
-    private var masterDataFile: java.io.File? = null
+    private var servedFiles: Map<String, java.io.File> = emptyMap()
 
     /** 在 UI 线程调用；返回 WebView 供 Compose 的 AndroidView 挂上去。 */
     @SuppressLint("SetJavaScriptEnabled")
@@ -66,12 +71,9 @@ class DeckEngine(private val context: Context) {
                     val url = request?.url?.toString() ?: return null
                     if (!url.startsWith(BASE)) return null
                     val path = url.removePrefix(BASE).substringBefore('?')
-                    // masterdata：直接返回落盘文件，避免把 15 MB JSON 塞进 JS 字符串
-                    if (path.trimStart('/') == "masterdata.json") {
-                        val file = masterDataFile ?: return WebResourceResponse(
-                            "text/plain", "utf-8", 404, "Not Found", emptyMap(),
-                            ByteArrayInputStream(ByteArray(0)),
-                        )
+                    // 注册过的落盘文件（masterdata / musicMetas）：直接返回文件流，
+                    // 避免把十几 MB 的 JSON 塞进 JS 字符串
+                    servedFiles[path.trimStart('/')]?.let { file ->
                         return WebResourceResponse(
                             "application/json", "utf-8", 200, "OK",
                             mapOf("Cache-Control" to "no-store"), file.inputStream(),
@@ -108,11 +110,21 @@ class DeckEngine(private val context: Context) {
         } ?: false
     }
 
-    /** 在 UI 线程调用：登记 masterdata 文件，让 JS 自己去取。 */
-    fun loadMasterDataFile(file: java.io.File) {
-        masterDataFile = file
+    /**
+     * 注册 masterdata 落盘文件；WebView 通过 `/masterdata.json` 直接取它（不经过 JS 字符串）。
+     *
+     * @param musicMetas 每首歌的分数/PT 系数表（`musicMetas.json`，2.4 MB）。
+     *   给了才会注册 `/musicMetas.json` —— 引擎算「分数 / 活动 PT」要用它，
+     *   算「综合力」不需要。没给时 boot.html 把第二个入参传 `"[]"`。
+     */
+    fun loadMasterDataFile(master: java.io.File, musicMetas: java.io.File? = null) {
+        servedFiles = buildMap {
+            put("masterdata.json", master)
+            musicMetas?.let { put("musicMetas.json", it) }
+        }
+        val musicArg = if (musicMetas != null) "'/musicMetas.json'" else "null"
         webView?.evaluateJavascript(
-            "window.deckBoot.loadFromUrl('" + "/masterdata.json" + "')",
+            "window.deckBoot.loadFromUrl('/masterdata.json', $musicArg)",
             null,
         )
     }

@@ -48,7 +48,7 @@ data class RecommendedCard(
     val trained: Boolean,
     val hasCanvasBonus: Boolean,
     val canvasPower: Int,
-    val eventBonus: Int?,
+    val eventBonus: Double?,
 )
 
 /** 一套推荐卡组。 */
@@ -62,7 +62,11 @@ data class RecommendedDeck(
     val skillScore: Double,
     val liveScore: Double,
     val eventPoint: Int?,
-    val eventBonusTotal: Int?,
+    /**
+     * 活动加成合计（**百分数，可能带半档**：引擎的加成按 0.1% 计，`230.5` 就是 230.5%）。
+     * 所以这里用 Double —— 截成 Int 会把 230.5 显示成 230，而这个数在控分场景下是要精确对的。
+     */
+    val eventBonusTotal: Double?,
     val multiLiveScoreUp: Double?,
 )
 
@@ -129,7 +133,7 @@ fun parseDeckRecommendResult(text: String): DeckRecommendResult {
             skillScore = obj.readDouble("skill_score", "skillScore") ?: 0.0,
             liveScore = obj.readDouble("live_score", "liveScore") ?: 0.0,
             eventPoint = obj.readInt("event_point", "eventPoint"),
-            eventBonusTotal = obj.readInt("event_bonus_total", "eventBonusTotal"),
+            eventBonusTotal = obj.readDouble("event_bonus_total", "eventBonusTotal"),
             multiLiveScoreUp = obj.readDouble("multi_live_score_up", "multiLiveScoreUp"),
         )
     }
@@ -163,7 +167,7 @@ private fun readCard(obj: JsonObject): RecommendedCard? {
         trained = obj.readBool("trained") ?: false,
         hasCanvasBonus = obj.readBool("has_canvas_bonus", "hasCanvasBonus") ?: false,
         canvasPower = obj.readInt("canvas_power", "canvasPower") ?: 0,
-        eventBonus = obj.readInt("event_bonus", "eventBonus"),
+        eventBonus = obj.readDouble("event_bonus", "eventBonus"),
     )
 }
 

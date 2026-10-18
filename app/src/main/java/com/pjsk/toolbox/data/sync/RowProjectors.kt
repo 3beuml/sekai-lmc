@@ -1,4 +1,4 @@
-﻿package com.pjsk.toolbox.data.sync
+package com.pjsk.toolbox.data.sync
 
 import com.pjsk.toolbox.ui.common.intOrNull
 import com.pjsk.toolbox.ui.common.longOrNull
@@ -37,6 +37,7 @@ object RowProjectors {
     const val AREA_ITEM_LEVELS_FILE = "areaItemLevels.json"
     const val HONORS_FILE = "honors.json"
     const val MASTER_LESSONS_FILE = "masterLessons.json"
+    const val MUSIC_METAS_FILE = "musicMetas.json"
 
     /**
      * 该表要用哪个裁剪器。返回 `null` 表示**不裁剪**，直接存原始 JSON 文本
@@ -49,6 +50,7 @@ object RowProjectors {
         AREA_ITEM_LEVELS_FILE -> AREA_ITEM_LEVELS
         HONORS_FILE -> HONORS
         MASTER_LESSONS_FILE -> MASTER_LESSONS
+        MUSIC_METAS_FILE -> MUSIC_METAS
         else -> null
     }
 
@@ -334,9 +336,60 @@ object RowProjectors {
         }
     }
 
+    /**
+     * 每首歌 × 每个难度的**分数/PT 系数**（社区产物 `music_metas.json`，5.6 MB / 3,804 行）。
+     *
+     * ## 为什么这张表不在 `TableCatalog` 的上游仓库里
+     *
+     * 它不是 sekai-master-db 的表，而是社区（pjsk.moe 那条线）从游戏资源反解出来的派生物。
+     * 组卡引擎算「分数 / 活动 PT」必须用它（`load_masterdata` 的**第二个参数**），
+     * 而 master data 里只有谱面等级、没有这些系数。
+     * 所以这张表标记成 `snapshotOnly`：只随内置快照分发，**在线同步不碰它**
+     * （上游仓库里没有这个文件，去下只会 404）。
+     *
+     * ## 只留引擎要的 12 个字段
+     *
+     * 上游 33 个字段里，`solo_score` / `pt_per_hour_*` / `pspi_*` 之类是 pjsk.moe 自己算的
+     * 展示值，引擎不读。逐字对齐引擎的测试夹具（`tests/music_metas.json`）后只剩这 12 个：
+     * `music_id / difficulty / music_time / event_rate / base_score / base_score_auto /
+     * skill_score_solo / skill_score_auto / skill_score_multi / fever_score /
+     * fever_end_time / tap_count`。**数值类型原样搬运**（`base_score` 是 f64、
+     * `event_rate`/`tap_count` 是整数），一旦统一成浮点，引擎会报 `expected i32`。
+     *
+     * ## 为什么要造 id
+     *
+     * 行由 `(music_id, difficulty)` 唯一确定，**没有 `id` 字段**，而 `master_rows`
+     * 的主键是 `(tableName, id)`。直接拿 `music_id` 当主键，同一首歌的 6 个难度会互相覆盖
+     * → 只剩最后一档，而界面上完全看不出来。这里造 `id = musicId × 10 + 难度序号`。
+     */
+    val MUSIC_METAS = RowProjector { obj ->
+        // 幂等：已经有 id 说明裁过了（在线同步/重复导入时不至于越裁越少）
+        if (obj["id"] is JsonPrimitive) return@RowProjector obj
+        val musicId = obj.intOrNull("music_id") ?: return@RowProjector null
+        val difficulty = obj.stringOrNull("difficulty") ?: return@RowProjector null
+        val diffOrdinal = MUSIC_DIFFICULTY_ORDER.indexOf(difficulty)
+        if (diffOrdinal < 0) return@RowProjector null
+        buildJsonObject {
+            put("id", musicId * 10 + diffOrdinal)
+            put("music_id", musicId)
+            put("difficulty", difficulty)
+            // ⚠️ 原样搬运，不做任何类型转换（见上面「数值类型原样」一段）
+            for (key in MUSIC_META_NUMERIC_FIELDS) obj[key]?.let { put(key, it) }
+        }
+    }
+
+    /** 引擎认的难度名，顺序决定 [MUSIC_METAS] 造 id 时用的序号。 */
+    private val MUSIC_DIFFICULTY_ORDER = listOf("easy", "normal", "hard", "expert", "master", "append")
+
+    /** 引擎读的数值字段（除 `music_id` / `difficulty` 之外的全部 10 个）。 */
+    private val MUSIC_META_NUMERIC_FIELDS = listOf(
+        "music_time", "event_rate", "base_score", "base_score_auto",
+        "skill_score_solo", "skill_score_auto", "skill_score_multi",
+        "fever_score", "fever_end_time", "tap_count",
+    )
+
     /** 把三个 `powerN…Rate` 读成一个长度 3 的数组（缺省给 0）。 */
-    private fun rateArray(obj: JsonObject, key1: String, key2: String, key3: String): JsonArray =
-        buildJsonArray {
+    private fun rateArray(obj: JsonObject, key1: String, key2: String, key3: String): JsonArray =        buildJsonArray {
             add(JsonPrimitive(obj.doubleOrNull(key1) ?: 0.0))
             add(JsonPrimitive(obj.doubleOrNull(key2) ?: 0.0))
             add(JsonPrimitive(obj.doubleOrNull(key3) ?: 0.0))

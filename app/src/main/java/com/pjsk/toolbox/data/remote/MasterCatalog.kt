@@ -1,4 +1,4 @@
-﻿package com.pjsk.toolbox.data.remote
+package com.pjsk.toolbox.data.remote
 
 /**
  * 区服定义。
@@ -98,6 +98,19 @@ data class TableSpec(
     val approxBytes: Long,
     /** 是否为「中文名叠加层」所需的 CN 表（见 [com.pjsk.toolbox.data.sync.MasterImporter.applyOverlay]）。 */
     val cnOverlay: Boolean = false,
+    /**
+     * **只随内置快照分发**，在线同步不下载。
+     *
+     * 为什么需要这个开关：`musicMetas.json`（每首歌的分数/PT 系数）是社区派生数据，
+     * **不在 sekai-master-db 仓库里**。若照常放进同步列表，每台设备同步时都会去
+     * `sekai-world.github.io/.../musicMetas.json` 拿一次 404，然后在同步界面上
+     * 永久显示一张「失败」的表 —— 用户会以为是自己网络的问题。
+     *
+     * 标了它的表：`forModules`（同步下载 + 体积统计）里不出现，
+     * 但 **`ALL` 里仍然有它** —— 打包器（`tools/datapack/BuildDataPack.kt`）与
+     * 数据表索引界面照旧能用。
+     */
+    val snapshotOnly: Boolean = false,
 )
 
 /**
@@ -171,6 +184,11 @@ object TableCatalog {
         TableSpec("areas.json", DataModule.CHARACTER, 9_638L),
 
         // ── 音乐 ────────────────────────────────────────────────
+        // 每首歌 × 每个难度的分数/PT 系数（组卡引擎算「分数 / 活动 PT」必需）。
+        // ⚠️ **不在 sekai-master-db 仓库里**（社区派生数据，来自 moe.exmeaning.com）：
+        //    所以标 `snapshotOnly` —— 只随内置快照分发，在线同步不下它（否则每次同步 404）。
+        //    体积 = 裁到引擎要的 12 个字段之后的实测值。
+        TableSpec("musicMetas.json", DataModule.MUSIC, 2_447_182L, snapshotOnly = true),
         TableSpec("limitedTimeMusics.json", DataModule.MUSIC, 785L, cnOverlay = true),
         TableSpec("musicCollaborations.json", DataModule.MUSIC, 1_001L),
         TableSpec("musicSoundTrackCategories.json", DataModule.MUSIC, 1_477L, cnOverlay = true),
@@ -254,8 +272,14 @@ object TableCatalog {
 
     val byFileName: Map<String, TableSpec> = ALL.associateBy { it.fileName }
 
+    /**
+     * 某几个模块里**可以下载**的表。
+     *
+     * `snapshotOnly` 的表（`musicMetas.json`）被排除：它们只随内置快照分发，
+     * 上游仓库里没有这个文件。若出现在同步列表里，用户会看到一张永远失败的表。
+     */
     fun forModules(modules: Set<DataModule>): List<TableSpec> =
-        ALL.filter { it.module in modules }
+        ALL.filter { it.module in modules && !it.snapshotOnly }
 
     fun totalBytes(modules: Set<DataModule>): Long =
         forModules(modules).sumOf { it.approxBytes }

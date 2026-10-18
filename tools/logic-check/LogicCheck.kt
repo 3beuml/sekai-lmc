@@ -154,6 +154,10 @@ import com.pjsk.toolbox.data.profile.OwnedCharacter
 import com.pjsk.toolbox.ui.common.intOrNull
 import com.pjsk.toolbox.data.deck.buildMasterDataPayload
 import com.pjsk.toolbox.data.deck.buildPowerParams
+import com.pjsk.toolbox.data.deck.buildRecommendParams
+import com.pjsk.toolbox.data.deck.DeckLiveType
+import com.pjsk.toolbox.data.deck.DeckTarget
+import com.pjsk.toolbox.data.deck.restoreMusicMetasJson
 import com.pjsk.toolbox.data.deck.buildUserJson
 import com.pjsk.toolbox.data.deck.parseDeckRecommendResult
 import com.pjsk.toolbox.data.deck.restoreAreaItemLevelsJson
@@ -2577,7 +2581,15 @@ fun main(args: Array<String>) {
             val file = row.stringValue("file") ?: return@mapNotNull null
             Triple(file, row.intValue("rows") ?: 0, (row.stringValue("bytes")?.toLongOrNull() ?: 0L))
         }
-        check("清单里有 72 张表", entries.size == 72, "实际=${entries.size}")
+        // 表数不写死：写死过一次 72，加一张表就要来改断言（而且改完还是硬的）。
+        // 真正要保证的是「清单里的表 == 表目录里的表」，用这个做判据。
+        val catalogFiles = TableCatalog.ALL.map { it.fileName }.toSet()
+        check(
+            "清单里的表与表目录一致（${entries.size} 张）",
+            entries.map { it.first }.toSet() == catalogFiles,
+            "清单多出=${entries.map { it.first }.toSet() - catalogFiles}，" +
+                "清单缺少=${catalogFiles - entries.map { it.first }.toSet()}",
+        )
 
         val sorted = entries.sortedWith(
             compareBy(
@@ -2602,7 +2614,7 @@ fun main(args: Array<String>) {
         val p2Bytes = p2.map { name -> entries.first { it.first == name }.third }
         check("P2 段按体积升序（小表先完成，进度条动得快）",
             p2Bytes.zipWithNext().all { (a, b) -> a <= b }, "体积序列前 8 项=${p2Bytes.take(8)}")
-        check("清单里 72 张表都排进去了", sorted.size == 72)
+        check("清单里的表全都排进了导入顺序", sorted.size == entries.size, "实际=${sorted.size} / ${entries.size}")
     }
 
     section("在线同步顺序：卡牌 / 歌曲在前，卡池垫底")
@@ -2697,6 +2709,9 @@ fun main(args: Array<String>) {
             val missingSha = mutableListOf<String>()
             for (row in tables) {
                 val file = row.stringValue("file") ?: continue
+                // `snapshotOnly` 的表（musicMetas.json）**本来就没有 sha**：
+                // 它不来自 sekai-master-db 仓库，没有任何 blob sha 可记。
+                if (TableCatalog.ALL.any { it.fileName == file && it.snapshotOnly }) continue
                 val sha = row.stringValue("sha")
                 if (sha == null) { missingSha += file; continue }
                 val raw = File(rawDirForCheck, file)
@@ -3889,9 +3904,16 @@ fun main(args: Array<String>) {
     checkEq("剧情已读标记", listOf(firstCard.episode1Read, firstCard.episode2Read), listOf(true, false))
     checkEq("★ 逐卡特训状态（卡图标用特训前还是后，要听引擎的）", firstCard.trained, true)
     checkEq("画布加成", listOf(firstCard.hasCanvasBonus, firstCard.canvasPower), listOf(true, 600))
-    checkEq("逐卡活动加成（本轮 target=power 用不到，但字段要能读到）", firstCard.eventBonus, 25)
+    checkEq("逐卡活动加成（本轮 target=power 用不到，但字段要能读到）", firstCard.eventBonus, 25.0)
     checkEq("event_point 读成 Int", engineOk.decks.first().eventPoint, 1234)
-    checkEq("event_bonus_total 读成 Int", engineOk.decks.first().eventBonusTotal, 25)
+    // 引擎的加成按 0.1% 计（文档明确写过 4.8% / 5.1% 这种半档），所以是 Double 不是 Int ——
+    // 截成整数会把 230.5% 显示成 230%。
+    checkEq("★ event_bonus_total 保留半档（Double，不是截断成 Int）", engineOk.decks.first().eventBonusTotal, 25.0)
+    checkEq(
+        "★ 半档加成不被截断",
+        parseDeckRecommendResult("""{"decks":[{"event_bonus_total":230.5}]}""").decks.first().eventBonusTotal,
+        230.5,
+    )
 
     // 缺字段的条目：没有 card_id 的卡直接丢（接不到内置卡表就等于无法显示），
     // 但**整套不能因此消失** —— 少一格比整页空白好。
@@ -3951,6 +3973,183 @@ fun main(args: Array<String>) {
         "decks 为空数组是**合法**结果（不抛）",
         runCatching { parseDeckRecommendResult("""{"decks":[]}""") }.getOrNull()?.decks?.isEmpty() == true,
     )
+
+    // ─────────────────────────────────────────────────────────
+    section("30. 三个目标 × 两种玩法：参数组装 + musicMetas 还原（批次 D 第 2/3 步）")
+    // 目标/玩法一多，最容易出的错是"参数拼上了但内容不对"——引擎不会报错，
+    // 只会按兜底表算出看着合理的数字。所以逐字段断言。
+
+    // 综合力：唯一完全离线的组合，绝不能带 event_id / music_id
+    val powerParams = json.parseToJsonElement(buildRecommendParams()).jsonObject
+    checkEq("power：target=power", powerParams.stringValue("target"), "power")
+    checkEq("power：live_type=solo", powerParams.stringValue("live_type"), "solo")
+    check(
+        "★ power 不带 event_id / music_id（带了就会去查活动/曲目表）",
+        !powerParams.containsKey("event_id") && !powerParams.containsKey("music_id"),
+    )
+
+    // 活动加成：必须带 event_id
+    val bonusParams = json.parseToJsonElement(
+        buildRecommendParams(target = DeckTarget.BONUS, eventId = 220),
+    ).jsonObject
+    checkEq("bonus：target=bonus", bonusParams.stringValue("target"), "bonus")
+    checkEq("★ bonus 带 event_id（加成率按活动算）", bonusParams.stringValue("event_id")?.toIntOrNull(), 220)
+    check("bonus 不带 music_id（不需要曲目）", !bonusParams.containsKey("music_id"))
+
+    // 分数：必须带 music_id + 难度；难度缺省时**不写** music_diff（引擎按 expert 兜底）
+    val scoreParams = json.parseToJsonElement(
+        buildRecommendParams(
+            target = DeckTarget.SCORE,
+            musicId = 123,
+            musicDiff = "master",
+            eventId = 220,
+        ),
+    ).jsonObject
+    checkEq("score：target=score", scoreParams.stringValue("target"), "score")
+    checkEq("★ score 带 music_id", scoreParams.stringValue("music_id")?.toIntOrNull(), 123)
+    checkEq("★ score 带 music_diff", scoreParams.stringValue("music_diff"), "master")
+    checkEq("★ score 同时带 event_id 时才会算活动 PT", scoreParams.stringValue("event_id")?.toIntOrNull(), 220)
+    check(
+        "没有 music_id 时**不写** music_diff（避免出现只有难度没有曲目的组合）",
+        !json.parseToJsonElement(buildRecommendParams(target = DeckTarget.SCORE, musicDiff = "expert"))
+            .jsonObject.containsKey("music_diff"),
+    )
+
+    // 多人：队友参数只在给了的时候出现
+    val multiParams = json.parseToJsonElement(
+        buildRecommendParams(
+            target = DeckTarget.SCORE,
+            liveType = DeckLiveType.MULTI,
+            musicId = 1,
+            musicDiff = "expert",
+            multiTeammatePower = 200000,
+            multiTeammateScoreUp = 150,
+        ),
+    ).jsonObject
+    checkEq("multi：live_type=multi", multiParams.stringValue("live_type"), "multi")
+    checkEq("★ 队友综合力透传", multiParams.stringValue("multi_teammate_power")?.toIntOrNull(), 200000)
+    checkEq("★ 队友技能值透传", multiParams.stringValue("multi_teammate_score_up")?.toIntOrNull(), 150)
+    check(
+        "队友参数不给就不写（按 0 算由引擎决定，不要伪造 0）",
+        !json.parseToJsonElement(buildRecommendParams(target = DeckTarget.SCORE, musicId = 1))
+            .jsonObject.containsKey("multi_teammate_power"),
+    )
+    // 稀有度配置必须每档都在：缺一档引擎就用默认（等于把用户没练的卡当满练）
+    checkEq(
+        "★ 五档稀有度配置齐全",
+        listOf("rarity1", "rarity2", "rarity3", "rarity4", "rarityBirthday")
+            .count { scoreParams.containsKey("${it}Config") },
+        5,
+    )
+
+    // ── musicMetas：上游 33 字段 → 引擎要的 12 个 ──
+    val metaRaw = """
+        {"music_id":1,"difficulty":"expert","music_time":123.2,"event_rate":114,
+         "base_score":1.005249294449671,"base_score_auto":0.7,
+         "skill_score_solo":[0.1,0.2,0.3,0.4,0.5,0.6],
+         "skill_score_auto":[0.1,0.2,0.3,0.4,0.5,0.6],
+         "skill_score_multi":[0.1,0.2,0.3,0.4,0.5,0.6],
+         "fever_score":0.228,"fever_end_time":100,"tap_count":76,
+         "solo_score":1234567,"pt_per_hour_auto":999,"pspi_solo_score":1}
+    """.trimIndent()
+    val metaRow = RowProjectors.MUSIC_METAS.project(json.parseToJsonElement(metaRaw).jsonObject)
+    check("musicMetas 裁剪成功", metaRow != null)
+    checkEq("★ 造出可反解的主键 id = musicId×10 + 难度序号（expert=3）", metaRow?.intOrNull("id"), 13)
+    checkEq("music_id 保留", metaRow?.intOrNull("music_id"), 1)
+    checkEq("difficulty 保留", metaRow?.stringValue("difficulty"), "expert")
+    checkEq(
+        "★ 引擎要的 12 个字段一个不少",
+        listOf(
+            "music_id", "difficulty", "music_time", "event_rate", "base_score", "base_score_auto",
+            "skill_score_solo", "skill_score_auto", "skill_score_multi", "fever_score",
+            "fever_end_time", "tap_count",
+        ).filter { metaRow?.containsKey(it) != true },
+        emptyList<String>(),
+    )
+    check(
+        "★ 数值类型原样搬运（base_score 是小数、event_rate/tap_count 是整数）",
+        metaRow?.stringValue("base_score") == "1.005249294449671" &&
+            metaRow?.stringValue("event_rate") == "114" &&
+            metaRow?.stringValue("tap_count") == "76",
+    )
+    check(
+        "不需要的展示字段被裁掉（solo_score / pt_per_hour_* / pspi_*）",
+        metaRow?.let { row ->
+            listOf("solo_score", "pt_per_hour_auto", "pspi_solo_score").none { row.containsKey(it) }
+        } == true,
+    )
+    checkEq(
+        "★ 幂等：已经裁过的行不会被二次裁剪（否则 id 会越变越怪）",
+        RowProjectors.MUSIC_METAS.project(metaRow!!),
+        metaRow,
+    )
+    check(
+        "未知难度被丢掉（引擎只认 easy/normal/hard/expert/master/append）",
+        RowProjectors.MUSIC_METAS.project(
+            json.parseToJsonElement("""{"music_id":1,"difficulty":"ultra"}""").jsonObject,
+        ) == null,
+    )
+    check(
+        "缺 music_id 的行被丢掉",
+        RowProjectors.MUSIC_METAS.project(
+            json.parseToJsonElement("""{"difficulty":"expert"}""").jsonObject,
+        ) == null,
+    )
+    // 六个难度各自的主键必须互不相同（否则同歌不同难度会互相覆盖）
+    checkEq(
+        "★ 六个难度的 id 互不相同",
+        listOf("easy", "normal", "hard", "expert", "master", "append")
+            .mapNotNull { diff ->
+                RowProjectors.MUSIC_METAS.project(
+                    json.parseToJsonElement("""{"music_id":7,"difficulty":"$diff"}""").jsonObject,
+                )?.intOrNull("id")
+            }
+            .distinct()
+            .size,
+        6,
+    )
+
+    // ── 还原成引擎的第二个入参：必须去掉本 App 的 id ──
+    val metasJson = restoreMusicMetasJson(listOf(metaRow.toString()))
+    val metasArray = json.parseToJsonElement(metasJson).jsonArray
+    checkEq("还原出 1 行", metasArray.size, 1)
+    val metasObj = metasArray.first().jsonObject
+    check(
+        "★ 还原时要**丢掉本 App 的主键 id**（引擎的 music_metas 没有这个字段）",
+        !metasObj.containsKey("id"),
+    )
+    checkEq("其余 12 个字段都还在", metasObj.keys.size, 12)
+    checkEq(
+        "空输入给空数组（引擎会 JSON.parse 它，绝不能是空串）",
+        restoreMusicMetasJson(emptyList()),
+        "[]",
+    )
+    checkEq(
+        "无效行（缺 music_id / difficulty）被丢掉",
+        json.parseToJsonElement(
+            restoreMusicMetasJson(
+                listOf("""{"difficulty":"expert"}""", """{"music_id":3}""", metaRow.toString()),
+            ),
+        ).jsonArray.size,
+        1,
+    )
+
+    // ── 表目录：musicMetas 只能随快照分发，在线同步必须看不到它 ──
+    val musicMetasSpec = TableCatalog.ALL.firstOrNull { it.fileName == "musicMetas.json" }
+    check("musicMetas 在表目录里（打包器要靠它）", musicMetasSpec != null)
+    checkEq("musicMetas 标了 snapshotOnly", musicMetasSpec?.snapshotOnly, true)
+    check(
+        "★ 在线同步的表清单里**没有** musicMetas（否则每台设备同步都会 404）",
+        TableCatalog.forModules(setOf(DataModule.MUSIC)).none { it.fileName == "musicMetas.json" },
+    )
+    check(
+        "★ 体积统计也不含它（那是内置数据的体积，不是要下载的量）",
+        TableCatalog.totalBytes(setOf(DataModule.MUSIC)) ==
+            TableCatalog.ALL
+                .filter { it.module == DataModule.MUSIC && !it.snapshotOnly }
+                .sumOf { it.approxBytes },
+    )
+    check("musicMetas 有裁剪器（否则 5.4 MB 的原始表会整张进 APK）", RowProjectors.forFile("musicMetas.json") != null)
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))

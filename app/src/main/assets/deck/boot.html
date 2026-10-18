@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh">
 <head>
   <meta charset="utf-8">
@@ -31,12 +31,23 @@
 
   // 从文件载入 masterdata：Kotlin 侧不走 evaluateJavascript 传大字符串
   // （那条路会对 15 MB JSON 做逐字符转义，实测一次要分配 148 MB，直接 OOM）。
-  const loadFromUrl = async (url) => {
+  //
+  // 第二个参数 `musicMetasUrl` 是 per-song 的分数/PT 系数表（2.4 MB）。它同样走文件通道，
+  // 而且是 `load_masterdata` 的**第二个入参** —— 算「分数 / 活动 PT」必须给它，
+  // 但算「综合力」用不上。没给时传 `"[]"`：**不能传空串**（引擎会直接 JSON.parse 空串，
+  // 报 `EOF while parsing a value at line 1 column 0`）。
+  const loadFromUrl = async (masterUrl, musicMetasUrl) => {
     try {
-      const res = await fetch(url);
+      const res = await fetch(masterUrl);
       const text = await res.text();
-      load_masterdata(text, "[]");
-      post("loaded", "ok chars=" + text.length);
+      let music = "[]";
+      if (musicMetasUrl) {
+        const mres = await fetch(musicMetasUrl);
+        const mtext = await mres.text();
+        if (mtext && mtext.trim().length > 2) music = mtext;
+      }
+      load_masterdata(text, music);
+      post("loaded", "ok master=" + text.length + " musicMetas=" + music.length);
       return "ok";
     } catch (e) {
       post("error", "load_from_url: " + (e && e.message ? e.message : e));
@@ -45,7 +56,7 @@
   };
 
   window.deckBoot = {
-    loadFromUrl: (url) => loadFromUrl(url),
+    loadFromUrl: (masterUrl, musicMetasUrl) => loadFromUrl(masterUrl, musicMetasUrl),
     // 载入 masterdata：masterJson 是 {"cards":"<表原文>", …} 的字符串
     load: (masterJson) => {
       try {

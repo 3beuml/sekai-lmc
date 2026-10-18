@@ -28,6 +28,13 @@ if (-not $skipFetch) {
     if ($LASTEXITCODE -ne 0) {
         Write-Host '⚠️ 简中服数据有不完整之处（见上面的 404 列表），快照的中文名会少那几张表' -ForegroundColor Yellow
     }
+
+    # musicMetas.json 不在 sekai-master-db 仓库里（社区派生数据，另一个上游），
+    # 所以由它自己的脚本抓（见 fetch-music-metas.mjs 开头的说明）。
+    & node (Join-Path $PSScriptRoot 'fetch-music-metas.mjs')
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '⚠️ musicMetas.json 没抓到：快照里不会有这张表，「分数 / 活动 PT」模式将不可用' -ForegroundColor Yellow
+    }
 }
 
 # ── 2. 重新编译 app（保证打包用的是当前那份裁剪器）────────────────

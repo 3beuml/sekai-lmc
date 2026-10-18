@@ -64,9 +64,18 @@ $src = Get-Content $catalog -Raw
 # 保留已有体积很重要：若某次取不到远端体积（例如 tree 响应被截断），
 # 绝不能把已经知道的精确体积降级成 0。
 $entries = New-Object 'System.Collections.Specialized.OrderedDictionary'
-foreach ($m in [regex]::Matches($src, 'TableSpec\("([^"]+)",\s*DataModule\.(\w+),\s*([0-9_]+)L(,\s*cnOverlay\s*=\s*true)?')) {
+foreach ($m in [regex]::Matches($src, 'TableSpec\("([^"]+)",\s*DataModule\.(\w+),\s*([0-9_]+)L((?:,\s*(?:cnOverlay|snapshotOnly)\s*=\s*true)*)')) {
     $existingSize = [int64]($m.Groups[3].Value -replace '_', '')
-    $entries[$m.Groups[1].Value] = @($m.Groups[2].Value, $m.Groups[4].Success, $existingSize)
+    $flags = $m.Groups[4].Value
+    # ⚠️ `snapshotOnly` 必须一起保留：它表示「只随内置快照分发、在线同步不下载」。
+    # 丢了它，`musicMetas.json`（不在 sekai-master-db 仓库里）会重新出现在同步列表里，
+    # 每台设备同步时都去拿一次 404。
+    $entries[$m.Groups[1].Value] = @(
+        $m.Groups[2].Value,
+        ($flags -match 'cnOverlay'),
+        $existingSize,
+        ($flags -match 'snapshotOnly')
+    )
 }
 if ($entries.Count -eq 0) { throw '未能从 MasterCatalog.kt 解析出任何 TableSpec。' }
 Write-Host "从 MasterCatalog.kt 解析到 $($entries.Count) 张表" -ForegroundColor Cyan
@@ -137,13 +146,20 @@ foreach ($mod in $order) {
         if ($entries[$name][0] -ne $mod) { continue }
         # 取不到远端体积时沿用清单里的旧值，避免把已知信息清零
         $size = if ($sizes.ContainsKey($name)) { $sizes[$name] } else { $entries[$name][2] }
-        $rows += [pscustomobject]@{ name = $name; size = $size; overlay = $entries[$name][1] }
+        $rows += [pscustomobject]@{
+            name = $name
+            size = $size
+            overlay = $entries[$name][1]
+            snapshotOnly = $entries[$name][3]
+        }
     }
     if ($rows.Count -eq 0) { continue }
     [void]$sb.AppendLine("        $($header[$mod])")
     foreach ($r in ($rows | Sort-Object size)) {
         $sizeText = '{0}L' -f $r.size.ToString('N0').Replace(',', '_')
         $flag = if ($r.overlay) { ', cnOverlay = true' } else { '' }
+        # snapshotOnly 只能是最后一个命名参数（Kotlin 里没有位置参数需求，但保持可读）
+        if ($r.snapshotOnly) { $flag += ', snapshotOnly = true' }
         [void]$sb.AppendLine("        TableSpec(`"$($r.name)`", DataModule.$mod, $sizeText$flag),")
     }
     [void]$sb.AppendLine('')

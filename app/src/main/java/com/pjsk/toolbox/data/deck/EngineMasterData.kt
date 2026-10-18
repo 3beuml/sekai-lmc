@@ -1,4 +1,4 @@
-﻿package com.pjsk.toolbox.data.deck
+package com.pjsk.toolbox.data.deck
 
 import com.pjsk.toolbox.data.profile.PlayerSnapshot
 import com.pjsk.toolbox.ui.common.intOrNull
@@ -244,20 +244,106 @@ fun buildUserJson(snapshot: PlayerSnapshot): String = buildString(256 * 1024) {
 }
 
 /**
- * 组装 `recommend` 的 `params_json`：**纯综合力最优**（`target: "power"`）。
+ * 组卡目标（引擎的 `target`）。
  *
- * 不带 `event_id` / `music_id`，所以不需要 `music_metas`（引擎的 `target=power` + 无活动
- * 是唯一完全离线的组合）。稀有度配置全开：等级满、剧情已读、突破与技能按用户实际值。
+ * - [POWER] 纯综合力最优：**完全离线**，不需要活动、不需要曲目系数。
+ * - [BONUS] 活动加成最优：要 `event_id`（活动相关的表快照里都有）。
+ * - [SCORE] 单局得分最优：要 `music_id` + 难度，且**必须有 `musicMetas`**
+ *   （per-song 系数，引擎的第二个入参）。带 `event_id` 时还会算活动 PT。
  */
-fun buildPowerParams(limit: Int = 10, timeoutMs: Int = 60_000): String = buildString(512) {
-    append("{\"region\":\"jp\",\"live_type\":\"solo\",\"target\":\"power\"")
+enum class DeckTarget(val key: String, val label: String) {
+    POWER("power", "综合力"),
+    BONUS("bonus", "活动加成"),
+    SCORE("score", "分数"),
+}
+
+/** 玩法（引擎的 `live_type`）。目标=综合力时这一项不影响结果。 */
+enum class DeckLiveType(val key: String, val label: String) {
+    SOLO("solo", "单人"),
+    MULTI("multi", "多人"),
+}
+
+/**
+ * 组装 `recommend` 的 `params_json`。
+ *
+ * 只有 `target=power` + 无活动 / 无曲目是**完全离线**的组合；
+ * [BONUS] 需要活动表，[SCORE] 需要 `musicMetas`。缺了对应输入时**不要**拼这个参数 ——
+ * 引擎会因为缺少上下文而按兜底表计算，结果是"看起来正常但不对"的数字。
+ *
+ * 稀有度配置全开：等级/突破/技能/剧情一律按用户实际值（`levelMax=false` 等），
+ * 因为我们算的是"我现在的卡能组出什么"，不是"全都练满能到什么"。
+ *
+ * @param eventId 真实活动 id。`target=score` 时给了它才会算活动 PT。
+ * @param musicId 曲目 id；`target=score` 必需。
+ * @param musicDiff 难度名（`easy`…`append`）；缺省引擎按 `expert` 处理，这里总要显式给。
+ * @param multiTeammatePower / multiTeammateScoreUp 多人模式的队友综合力与技能值。
+ *   不给就是 0 —— 结果会偏低，但**排名仍然可比**（同一份缺口对所有候选一样）。
+ */
+fun buildRecommendParams(
+    target: DeckTarget = DeckTarget.POWER,
+    liveType: DeckLiveType = DeckLiveType.SOLO,
+    limit: Int = 10,
+    timeoutMs: Int = 60_000,
+    eventId: Int? = null,
+    musicId: Int? = null,
+    musicDiff: String? = null,
+    multiTeammatePower: Int? = null,
+    multiTeammateScoreUp: Int? = null,
+): String = buildString(512) {
+    append("{\"region\":\"jp\",\"live_type\":\"").append(liveType.key)
+    append("\",\"target\":\"").append(target.key).append('"')
     append(",\"limit\":").append(limit.coerceIn(1, 30))
     append(",\"timeout_ms\":").append(timeoutMs)
+    eventId?.let { append(",\"event_id\":").append(it) }
+    musicId?.let { append(",\"music_id\":").append(it) }
+    if (musicId != null && !musicDiff.isNullOrBlank()) {
+        append(",\"music_diff\":\"").append(musicDiff).append('"')
+    }
+    multiTeammatePower?.let { append(",\"multi_teammate_power\":").append(it) }
+    multiTeammateScoreUp?.let { append(",\"multi_teammate_score_up\":").append(it) }
     for (rarity in listOf("rarity1", "rarity2", "rarity3", "rarity4", "rarityBirthday")) {
         append(",\"${rarity}Config\":{\"disable\":false,\"levelMax\":false,\"episodeRead\":false")
         append(",\"masterMax\":false,\"skillMax\":false}")
     }
     append('}')
+}
+
+/**
+ * 纯综合力最优（`target=power`，无活动、无曲目）—— 引擎唯一完全离线的组合。
+ *
+ * 保留这个入口是因为它是**默认模式**，而且自检与老调用点都按这个名字写的。
+ */
+fun buildPowerParams(limit: Int = 10, timeoutMs: Int = 60_000): String =
+    buildRecommendParams(target = DeckTarget.POWER, limit = limit, timeoutMs = timeoutMs)
+
+/**
+ * 把库里的 `musicMetas` 行还原成引擎 `load_masterdata` 的**第二个参数**。
+ *
+ * 两件事：
+ *  1. 丢掉裁剪器造的 `id`（那是本 App 数据库的主键，引擎不认这个字段；
+ *     多给字段虽然大多会被 serde 忽略，但**没必要拿这个去赌**）。
+ *  2. 拼成一个 JSON 数组文本 —— 引擎直接 `JSON.parse` 它，不能传空串
+ *     （§17.3 第 1 条：空串会报 `EOF while parsing a value`）。
+ *
+ * 行里若缺 `music_id` / `difficulty` 就丢掉：那种行对引擎一定无用，
+ * 留着只会让它整张表解析失败。
+ */
+fun restoreMusicMetasJson(croppedRows: List<String>): String = buildString(croppedRows.size * 640) {
+    append('[')
+    var first = true
+    for (raw in croppedRows) {
+        val obj = raw.parseJsonObjectOrNull() ?: continue
+        if (obj.intOrNull("music_id") == null) continue
+        if (obj.str("difficulty").isNullOrBlank()) continue
+        if (!first) append(',')
+        first = false
+        append(
+            kotlinx.serialization.json.JsonObject(
+                obj.filterKeys { it != "id" },
+            ).toString(),
+        )
+    }
+    append(']')
 }
 
 // ── 小工具 ──
