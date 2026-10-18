@@ -45,6 +45,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -85,7 +86,14 @@ import com.pjsk.toolbox.data.settings.ScoreMetric
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.settings.NameLanguage
+import com.pjsk.toolbox.data.score.Best30Entry
+import com.pjsk.toolbox.data.score.Best30Result
+import com.pjsk.toolbox.data.score.ChartConstants
+import com.pjsk.toolbox.data.score.computeBest30
+import com.pjsk.toolbox.data.score.formatBest30
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -154,6 +162,8 @@ fun MyPlayerScreen(
     var error by remember { mutableStateOf<String?>(null) }
     // 羁绊面板的当前层级。放在 Scaffold 外面，因为面板本身要画在整页之上。
     var sheet by remember(account) { mutableStateOf<BondSheetState>(BondSheetState.None) }
+    // Best30 的完整列表面板（和羁绊面板同理，浮层要画在整页之上）
+    var showBest30Sheet by remember(account) { mutableStateOf(false) }
 
     // 这几个提到 Scaffold 外面：羁绊面板画在 Scaffold 之后，拿不到 Column 内部的局部变量。
     val region = account?.let { ServerRegion.fromId(it.server) } ?: ServerRegion.DEFAULT
@@ -167,6 +177,15 @@ fun MyPlayerScreen(
     val songsTotal = remember(allMusics, difficultyLevels) {
         availableDifficulties(difficultyLevels).associateWith { d ->
             songsWithDifficulty(allMusics, difficultyLevels, d).size
+        }
+    }
+    val songTitles = remember(allMusics) { allMusics.associate { it.id to it.title } }
+
+    // Best30 的定数表是内置资源（27 KB CSV）。读盘 + 解析放 IO；读不出来就是空表，
+    // 那一块整个不显示，不影响页面其余部分。
+    val chartConstants by produceState<Map<Int, Map<String, Double>>>(emptyMap()) {
+        value = withContext(Dispatchers.IO) {
+            ChartConstants.load { context.assets.open(CHART_CONSTANTS_ASSET) }
         }
     }
 
@@ -261,6 +280,9 @@ fun MyPlayerScreen(
                 unitColorOf(leaderCard, charsById, unitColors) ?: Color(0xFF6750A4)
             }
             val bondsAll = remember(snap.bonds) { sortBonds(snap.bonds) }
+            val best30 = remember(snap.musicResults, chartConstants) {
+                computeBest30(snap.musicResults, chartConstants)
+            }
 
             HeroCard(snap = snap, server = acc.server, region = region, leaderCard = leaderCard, accent = accent)
 
@@ -333,6 +355,47 @@ fun MyPlayerScreen(
                             valueText = "${metricCount(diff)} / $total",
                             labelWidth = 52,
                             valueWidth = 92,
+                        )
+                    }
+                }
+            }
+
+            // ── Best30 ──
+            // 只有「定数表读出来了 + 至少有一条 AP/FC」时才显示；否则整块不出现
+            if (!best30.isEmpty) {
+                CardModule(
+                    title = "Best30",
+                    actionLabel = if (best30.entries.size > BEST30_PREVIEW) "全部 ${best30.entries.size} 首" else null,
+                    onAction = { showBest30Sheet = true },
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = formatBest30(best30.average),
+                            style = MaterialTheme.typography.displaySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = accent,
+                        )
+                        Spacer(Modifier.width(14.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "平均定数 · 已计入 ${best30.entries.size} / ${Best30Result.LIMIT}",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            HintText(
+                                if (best30.isComplete) {
+                                    "AP 计定数、FC 计定数 − 1；只看 AP/FC，不看高分。"
+                                } else {
+                                    "合格谱面只有 ${best30.poolSize} 个（不足 30），这个平均值与社区的 B30 不可比。"
+                                },
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    best30.entries.take(BEST30_PREVIEW).forEachIndexed { index, entry ->
+                        Best30Row(
+                            rank = index + 1,
+                            entry = entry,
+                            title = songTitles[entry.musicId],
                         )
                     }
                 }
@@ -426,6 +489,17 @@ fun MyPlayerScreen(
             region = region,
             onNavigate = { sheet = it },
             onDismiss = { sheet = BondSheetState.None },
+        )
+    }
+
+    // Best30 的完整列表（30 条，模块里只放前 5 条）
+    if (showBest30Sheet) {
+        val results = snapshot?.musicResults.orEmpty()
+        val full = remember(results, chartConstants) { computeBest30(results, chartConstants) }
+        Best30Sheet(
+            result = full,
+            songTitles = songTitles,
+            onDismiss = { showBest30Sheet = false },
         )
     }
 }
@@ -639,6 +713,118 @@ private fun RarityBarRow(bucket: RarityBucket, max: Int) {
         color = MaterialTheme.colorScheme.primary,
         valueText = "${bucket.count} 张",
     )
+}
+
+// ─────────────────────────────────────────────────────────────
+// Best30
+// ─────────────────────────────────────────────────────────────
+
+/** 模块里先列几条（其余进「全部」面板）。 */
+private const val BEST30_PREVIEW = 5
+
+/** 内置定数表在 assets 里的路径（生成脚本见 tools/pjskb30/build-asset.mjs）。 */
+private const val CHART_CONSTANTS_ASSET = "pjskb30/chart-constants.csv"
+
+/** 难度缩写（`MusicDifficultyKind` 那份在 data.music，这里只要三个字母）。 */
+private fun difficultyAbbr(difficulty: String): String = when (difficulty.lowercase()) {
+    "easy" -> "EZY"
+    "normal" -> "NRM"
+    "hard" -> "HRD"
+    "expert" -> "EXP"
+    "master" -> "MAS"
+    "append" -> "APD"
+    else -> difficulty.uppercase().take(3)
+}
+
+/**
+ * Best30 的一条：排名 · 曲名 · 难度 · 定数 · AP/FC。
+ *
+ * 显示的是**贡献值**（AP = 定数、FC = 定数 − 1），定数本身也写出来 ——
+ * 否则用户会奇怪"这首 32.7 为什么算 31.7"。
+ */
+@Composable
+private fun Best30Row(rank: Int, entry: Best30Entry, title: String?) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "$rank",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(22.dp),
+        )
+        Text(
+            text = title ?: "#${entry.musicId}",
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = difficultyAbbr(entry.difficulty),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(30.dp),
+        )
+        Text(
+            // AP 显示定数本身，FC 显示「定数 − 1」的关系
+            text = if (entry.allPerfect) {
+                String.format(java.util.Locale.US, "%.1f", entry.constant)
+            } else {
+                String.format(java.util.Locale.US, "%.1f→%.1f", entry.constant, entry.value)
+            },
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.width(70.dp),
+        )
+        Text(
+            text = if (entry.allPerfect) "AP" else "FC",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = if (entry.allPerfect) {
+                MaterialTheme.colorScheme.tertiary
+            } else {
+                MaterialTheme.colorScheme.primary
+            },
+        )
+    }
+}
+
+/** Best30 的完整 30 条。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun Best30Sheet(
+    result: Best30Result,
+    songTitles: Map<Int, String>,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Best30", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "平均定数 ${formatBest30(result.average)} · ${result.entries.size} / ${Best30Result.LIMIT} 首",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp),
+        ) {
+            items(result.entries.size) { index ->
+                val entry = result.entries[index]
+                Best30Row(rank = index + 1, entry = entry, title = songTitles[entry.musicId])
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────

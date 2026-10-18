@@ -106,6 +106,13 @@ fun AboutScreen(onBack: () -> Unit) {
                     "所以镜像不可用时只会变慢，不会打不开。",
             )
 
+            Section("内置第三方数据")
+            Body(
+                "谱面定数表（Best30 用）：来自 auburnsummer/pjskb30 汇总、moe.exmeaning.com 分发，" +
+                    "许可 CC0-1.0（公有领域），已随 App 内置一份裁剪版（约 27 KB）。" +
+                    "官方 master data 里没有定数，所以这是本 App 唯一一份非官方内置数据。",
+            )
+
             Section("数据实时性")
             Body(
                 "以日服数据为主结构与进度，中文名按 id 从简中服叠加。" +

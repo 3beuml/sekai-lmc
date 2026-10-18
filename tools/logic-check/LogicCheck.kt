@@ -149,6 +149,10 @@ import com.pjsk.toolbox.data.profile.filterMySongs
 import com.pjsk.toolbox.data.profile.myMusicQueryFromSaveText
 import com.pjsk.toolbox.data.profile.statusCounts
 import com.pjsk.toolbox.data.profile.songStatusByDifficulty
+import com.pjsk.toolbox.data.score.Best30Result
+import com.pjsk.toolbox.data.score.computeBest30
+import com.pjsk.toolbox.data.score.formatBest30
+import com.pjsk.toolbox.data.score.parseChartConstants
 import com.pjsk.toolbox.data.profile.toSaveText
 import com.pjsk.toolbox.data.profile.MusicResult
 import com.pjsk.toolbox.data.profile.SongPlayFilter
@@ -3306,6 +3310,119 @@ fun main(args: Array<String>) {
         playStatusIndex(detailResults, "master")[7]?.fullCombo,
         byDifficulty["master"]?.fullCombo,
     )
+
+    // ─────────────────────────────────────────────────────────
+    section("26. Best30：谱面定数表 + AP/FC 计分规则（pjskb30 口径）")
+    // ─────────────────────────────────────────────────────────
+    // 这一节防的是**算错平均分**。Best30 是玩家之间唯一可比的单一数字，
+    // 规则写错（把高分也算进去、AP/FC 混淆、同一谱面重复计入、不足 30 条拿 0 填充）
+    // 都会给出一个"看起来像模像样其实没意义"的数。
+    val constText = """
+        # 注释行
+        musicId,difficulty,constant
+        1,expert,22.9
+        1,Master,26.1
+        1,expert,23.5
+        2,append,26.9
+        bad,expert,20
+        3,expert,notanumber
+        4,expert,0
+        5,expert
+    """.trimIndent()
+    val constMap = parseChartConstants(constText)
+    checkEq("解析：注释/表头/坏行都被跳过", constMap.keys.sorted(), listOf(1, 2))
+    checkEq("解析：难度统一小写（Master → master）", constMap[1]?.keys?.sorted(), listOf("expert", "master"))
+    checkEq("★ 解析：同一谱面多行取最大值（22.9 / 23.5 → 23.5）", constMap[1]?.get("expert"), 23.5)
+    checkEq("解析：定数 0 / 非数字的行被丢掉", constMap[4], null)
+    checkEq("解析：列不足的行被丢掉", constMap[5], null)
+
+    val b30Constants = mapOf(
+        10 to mapOf("master" to 30.0, "expert" to 25.0),
+        11 to mapOf("master" to 32.0),
+        12 to mapOf("master" to 28.0),
+        13 to mapOf("master" to 29.0),
+    )
+    val b30Results = listOf(
+        // 10：master AP（30.0）+ 同一谱面再来一条 FC（29.0）→ 去重取 AP
+        MusicResult(10, "master", fullCombo = true, allPerfect = true, highScore = 1_100_000),
+        MusicResult(10, "master", fullCombo = true, allPerfect = false, highScore = 1_900_000),
+        // 11：master FC → 32.0 - 1 = 31.0
+        MusicResult(11, "master", fullCombo = true, allPerfect = false, highScore = 2_000_000),
+        // 12：只有高分没有 FC/AP → 不计
+        MusicResult(12, "master", fullCombo = false, allPerfect = false, highScore = 2_500_000),
+        // 13：master AP → 29.0
+        MusicResult(13, "master", fullCombo = true, allPerfect = true, highScore = 900_000),
+        // 99：定数表里没有 → 不计
+        MusicResult(99, "master", fullCombo = true, allPerfect = true, highScore = 3_000_000),
+        // 10 的 expert 没打过 → 不计
+        MusicResult(8, "expert", fullCombo = true, allPerfect = true, highScore = 1_000_000),
+    )
+    val b30 = computeBest30(b30Results, b30Constants)
+    checkEq(
+        "★ 只有 AP/FC 计入，且按值降序",
+        b30.entries.map { "${it.musicId}:${it.value}" },
+        listOf("11:31.0", "10:30.0", "13:29.0"),
+    )
+    checkEq("AP 计定数本身", b30.entries.first { it.musicId == 10 }.value, 30.0)
+    checkEq("★ FC 计定数 − 1", b30.entries.first { it.musicId == 11 }.value, 31.0)
+    checkEq("★ 同一谱面只计一次（AP 的那条胜出，不是 30.0 和 29.0 都算）", b30.entries.count { it.musicId == 10 }, 1)
+    checkEq(
+        "★ 高分完全不看（12 的高分是全场最高，但没 FC/AP 所以不进）",
+        b30.entries.any { it.musicId == 12 },
+        false,
+    )
+    checkEq("定数表里没有的谱面不进池子", b30.entries.any { it.musicId == 99 }, false)
+    checkEq("★ 平均值 = 三条的算术平均", b30.average, 30.0)
+    checkEq("合格谱面总数（截断前）", b30.poolSize, 3)
+    checkEq("★ 不足 30 条时不补 0（补 0 会把平均分打到地板）", b30.entries.size, 3)
+    checkEq("不足 30 条时标记为不完整", b30.isComplete, false)
+    checkEq("平均值格式化两位小数", formatBest30(b30.average), "30.00")
+
+    // 满 30 条 + 截断 + 稳定排序
+    val manyResults = (1..40).map { i ->
+        // 定数 40 → 1，全部 AP；号小的分高
+        MusicResult(i, "master", fullCombo = true, allPerfect = true, highScore = 0)
+    }
+    val manyConstants = (1..40).associate { i -> i to mapOf("master" to (41.0 - i)) }
+    val full30 = computeBest30(manyResults, manyConstants)
+    checkEq("★ 取前 30 条", full30.entries.size, 30)
+    checkEq("合格总数仍然是 40", full30.poolSize, 40)
+    checkEq("凑满 30 条", full30.isComplete, true)
+    checkEq("★ 留的是值最高的那 30 条（定数 40 排第一）", full30.entries.first().musicId, 1)
+    checkEq("被截掉的是最低的 10 条", full30.entries.last().musicId, 30)
+    checkEq("平均值 = 前 30 条的平均", full30.average, (1..30).map { 41.0 - it }.average())
+
+    // 同值时顺序稳定（按 musicId 升序），否则每次进页面列表会跳动
+    val tieConstants = (1..3).associate { i -> i to mapOf("master" to 30.0) }
+    val tieResults = listOf(3, 1, 2).map { i ->
+        MusicResult(i, "master", fullCombo = true, allPerfect = true, highScore = 0)
+    }
+    checkEq(
+        "同值时按 musicId 升序（顺序稳定，不随上游行序跳）",
+        computeBest30(tieResults, tieConstants).entries.map { it.musicId },
+        listOf(1, 2, 3),
+    )
+
+    checkEq("空定数表 → 空结果（界面据此整块不显示）", computeBest30(b30Results, emptyMap()), Best30Result.EMPTY)
+    checkEq("没有任何成绩 → 空结果", computeBest30(emptyList(), b30Constants), Best30Result.EMPTY)
+
+    // ── 真实的内置定数表 ──
+    run {
+        val constantsFile = File("app/src/main/assets/pjskb30/chart-constants.csv")
+        check("内置定数表存在", constantsFile.isFile, constantsFile.absolutePath)
+        if (constantsFile.isFile) {
+            val realConstants = parseChartConstants(constantsFile.readText())
+            val chartCount = realConstants.values.sumOf { it.size }
+            check("★ 内置定数表覆盖 1700+ 个谱面", chartCount >= 1700, "实际 $chartCount")
+            check("曲目数 700+", realConstants.size >= 700, "实际 ${realConstants.size}")
+            checkEq("已知对照：#1 Expert = 22.9", realConstants[1]?.get("expert"), 22.9)
+            checkEq("已知对照：#1 Master = 26.1", realConstants[1]?.get("master"), 26.1)
+            val onlyThree = realConstants.values.flatMap { it.keys }.toSet()
+            checkEq("只有 Expert / Master / Append 三档（其余难度没有定数）", onlyThree.sorted(), listOf("append", "expert", "master"))
+            val values = realConstants.values.flatMap { it.values }
+            check("定数范围合理（21.0 ~ 38.1）", values.min() >= 21.0 && values.max() <= 38.2, "${values.min()}~${values.max()}")
+        }
+    }
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))
