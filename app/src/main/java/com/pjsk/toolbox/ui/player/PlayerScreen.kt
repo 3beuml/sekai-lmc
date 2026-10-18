@@ -1,4 +1,4 @@
-﻿package com.pjsk.toolbox.ui.player
+package com.pjsk.toolbox.ui.player
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -49,9 +49,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -107,8 +110,9 @@ import com.pjsk.toolbox.data.player.sleepTimerOptionOf
 import com.pjsk.toolbox.data.player.sleepTimerRemainingMs
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
-import com.pjsk.toolbox.data.palette.PlayerPaletteArgb
-import com.pjsk.toolbox.data.palette.playerPaletteFromPixels
+import com.pjsk.toolbox.data.palette.DarkPlayerPalette
+import com.pjsk.toolbox.data.palette.darkPlayerPaletteFromPixels
+import com.pjsk.toolbox.data.palette.pickArtworkSeed
 import com.pjsk.toolbox.ui.theme.resolveDark
 import coil.imageLoader
 import coil.request.ImageRequest
@@ -204,6 +208,9 @@ fun PlayerScreen(
     }
     if (track == null) return
 
+    // 播放器永远是深色 → 系统栏图标必须切浅色（否则浅色主题下时间/电量看不见）
+    LightSystemBarIcons()
+
     // ── 封面来源：歌曲曲绘 / 自定义卡面（随机） ──
     // ── 封面来源：歌曲曲绘 / 自定义卡面（按筛选条件随机） ──
     //
@@ -267,17 +274,18 @@ fun PlayerScreen(
     // 16:9 只在"确实有卡面"时生效：曲绘本身就是方的，套 16:9 只会把它裁扁
     val wideCover = coverAspect == CoverAspect.WIDE && coverCard != null
 
-    // ── 封面取色（Step 3）──
+    // ── 封面取色（0.1.41：深色沉浸式）──
+    //
+    // 播放器**永远是深色的**，不管 App 主题是浅是深。理由见 DarkPlayerPalette 的注释：
+    // 浅色底被染色容错窗口太窄，只有少数封面的色相恰好落在甜点。
     //
     // 缓存刻意允许 value 为 null：null 表示"这张封面算过、但不适合取色"，
     // 与"还没算过"是两回事 —— 否则每次重组都会重算一遍失败的结果。
     val appContext = LocalContext.current.applicationContext
-    val themeMode by container.appSettings.themeMode.collectAsState()
-    val darkTheme = themeMode.resolveDark()
-    val paletteCache = remember { LinkedHashMap<String, PlayerPaletteArgb?>() }
-    var coverPalette by remember { mutableStateOf<PlayerPaletteArgb?>(null) }
+    val paletteCache = remember { LinkedHashMap<String, DarkPlayerPalette?>() }
+    var coverPalette by remember { mutableStateOf<DarkPlayerPalette?>(null) }
 
-    LaunchedEffect(coverKey, darkTheme, coverUrl) {
+    LaunchedEffect(coverKey, coverUrl) {
         val id = coverKey
         if (paletteCache.containsKey(id)) {
             coverPalette = paletteCache[id]
@@ -285,6 +293,7 @@ fun PlayerScreen(
         }
         // 先把上一张的颜色摘掉，避免"这张还没算完、却在用上张颜色"的错觉
         coverPalette = null
+        var pixelInfo = "no-bitmap"
         val extracted = withContext(Dispatchers.IO) {
             runCatching {
                 // ⚠️ 两个参数都是必须的：
@@ -305,7 +314,10 @@ fun PlayerScreen(
                 if (w <= 0 || h <= 0) return@runCatching null
                 val pixels = IntArray(w * h)
                 bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-                playerPaletteFromPixels(pixels, darkTheme)
+                // 严格档 / 宽松档分别成没成，是排查"这张封面到底取没取到色"的关键信息
+                val strict = pickArtworkSeed(pixels) != null
+                pixelInfo = "${w}x$h " + if (strict) "strict" else "loose-or-none"
+                darkPlayerPaletteFromPixels(pixels)
             }.getOrNull()
         }
         paletteCache[id] = extracted
@@ -314,47 +326,57 @@ fun PlayerScreen(
             paletteCache.remove(paletteCache.keys.first())
         }
         // 诊断日志：取色是"算错也不报错"的那类逻辑，出问题只能靠这行看
-        // （`adb logcat -d -s PlayerPalette:I`）。null = 这张封面不适合取色，走主题色。
+        // （`adb logcat -d -s PlayerPalette:I`）。px=no-bitmap 表示图没加载成功，
+        // seed=none 表示加载成功但没有可用的种子色 → 都回落默认深色。
         android.util.Log.i(
             "PlayerPalette",
-            "cover=$id dark=$darkTheme " +
+            "cover=$id px=$pixelInfo " +
                 "seed=${extracted?.seed?.let { "#%06X".format(it and 0xFFFFFF) } ?: "none"} " +
-                "primary=${extracted?.primary?.let { "#%06X".format(it and 0xFFFFFF) } ?: "theme"} " +
-                "top=${extracted?.gradientTop?.let { "#%06X".format(it and 0xFFFFFF) } ?: "theme"}",
+                "accent=${extracted?.accent?.let { "#%06X".format(it and 0xFFFFFF) } ?: "default"} " +
+                "top=${extracted?.gradientTop?.let { "#%06X".format(it and 0xFFFFFF) } ?: "default"}",
         )
         coverPalette = extracted
     }
 
     // 颜色切换用**渐变**而不是硬切：硬切会让整屏"啪"一下换色，很廉价。
-    // 取不到封面时（coverPalette == null）回落全局主题色，动画自然过渡。
-    val baseColors = MaterialTheme.colorScheme
+    // 取不到封面时回落 App 的**深色**方案（不是浅色 —— 播放器永远是深的）。
+    val fallbackDark = darkColorScheme()
     val animSpec = tween<Color>(durationMillis = 450)
-    val animPrimary by animateColorAsState(coverPalette?.primary?.let { Color(it) } ?: baseColors.primary, animSpec)
-    val animOnPrimary by animateColorAsState(coverPalette?.onPrimary?.let { Color(it) } ?: baseColors.onPrimary, animSpec)
-    val animTop by animateColorAsState(
-        coverPalette?.gradientTop?.let { Color(it) } ?: baseColors.surfaceContainerHigh,
-        animSpec,
-    )
-    val animBottom by animateColorAsState(
-        coverPalette?.gradientBottom?.let { Color(it) } ?: baseColors.background,
-        animSpec,
-    )
-    val animOnSurface by animateColorAsState(coverPalette?.onSurface?.let { Color(it) } ?: baseColors.onSurface, animSpec)
-    val animOnSurfaceVariant by animateColorAsState(
-        coverPalette?.onSurfaceVariant?.let { Color(it) } ?: baseColors.onSurfaceVariant,
-        animSpec,
-    )
-    // 只覆盖播放器真正用到的那些角色，**不整份替换** ColorScheme：
-    // 换整份意味着 tertiary/error 之类也跟着偏色，而那些地方没人会检查对比度。
-    val playerColors = baseColors.copy(
-        primary = animPrimary,
-        onPrimary = animOnPrimary,
-        background = animBottom,
-        surface = animBottom,
-        surfaceContainerHigh = animTop,
-        surfaceContainerHighest = animTop,
-        onSurface = animOnSurface,
-        onSurfaceVariant = animOnSurfaceVariant,
+    @Composable
+    fun animArgb(argb: Int?, fallback: Color): Color =
+        animateColorAsState(argb?.let { Color(it) } ?: fallback, animSpec).value
+
+    // **整份** ColorScheme 派生：一个角色都不留给原主题。
+    // 之前只换 7 个角色，剩下的 secondary/tertiary/outline 还是初音绿和粉 →
+    // 红封面配绿次色，就是"只有部分封面好看"的主因。
+    val playerColors = darkColorScheme().copy(
+        primary = animArgb(coverPalette?.accent, fallbackDark.primary),
+        onPrimary = animArgb(coverPalette?.onAccent, fallbackDark.onPrimary),
+        primaryContainer = animArgb(coverPalette?.accentContainer, fallbackDark.primaryContainer),
+        onPrimaryContainer = animArgb(coverPalette?.onAccentContainer, fallbackDark.onPrimaryContainer),
+        // secondary 是"低饱和的同族色"：深底上要能读，但不抢主色
+        secondary = animArgb(coverPalette?.onSurfaceVariant, fallbackDark.secondary),
+        onSecondary = animArgb(coverPalette?.surfaceContainer, fallbackDark.onSecondary),
+        secondaryContainer = animArgb(coverPalette?.accentContainer, fallbackDark.secondaryContainer),
+        onSecondaryContainer = animArgb(coverPalette?.onAccentContainer, fallbackDark.onSecondaryContainer),
+        // tertiary 不常出现在播放器主路径上，但也绝不能是粉色
+        tertiary = animArgb(coverPalette?.accent, fallbackDark.tertiary),
+        onTertiary = animArgb(coverPalette?.onAccent, fallbackDark.onTertiary),
+        tertiaryContainer = animArgb(coverPalette?.surfaceHigh, fallbackDark.tertiaryContainer),
+        onTertiaryContainer = animArgb(coverPalette?.onSurface, fallbackDark.onTertiaryContainer),
+        background = animArgb(coverPalette?.gradientBottom, fallbackDark.background),
+        onBackground = animArgb(coverPalette?.onSurface, fallbackDark.onBackground),
+        surface = animArgb(coverPalette?.gradientBottom, fallbackDark.surface),
+        onSurface = animArgb(coverPalette?.onSurface, fallbackDark.onSurface),
+        surfaceVariant = animArgb(coverPalette?.surfaceHigh, fallbackDark.surfaceVariant),
+        onSurfaceVariant = animArgb(coverPalette?.onSurfaceVariant, fallbackDark.onSurfaceVariant),
+        surfaceContainerLowest = animArgb(coverPalette?.gradientBottom, fallbackDark.surfaceContainerLowest),
+        surfaceContainerLow = animArgb(coverPalette?.surfaceLow, fallbackDark.surfaceContainerLow),
+        surfaceContainer = animArgb(coverPalette?.surfaceContainer, fallbackDark.surfaceContainer),
+        surfaceContainerHigh = animArgb(coverPalette?.surfaceHigh, fallbackDark.surfaceContainerHigh),
+        surfaceContainerHighest = animArgb(coverPalette?.surfaceHighest, fallbackDark.surfaceContainerHighest),
+        outline = animArgb(coverPalette?.outline, fallbackDark.outline),
+        outlineVariant = animArgb(coverPalette?.outlineVariant, fallbackDark.outlineVariant),
     )
 
     val vocals = detail?.vocals.orEmpty()
@@ -434,9 +456,10 @@ fun PlayerScreen(
      * ⚠️ 因此这里**不能**再用 `verticalScroll`：滚动列里 `weight` 拿不到有界高度，
      * "把按钮钉在底部"和"整屏可滚"在同一个 Column 里是互斥的。
      */
-    // 只把**播放器这一屏**包进封面配色里（`playerColors`）：
-    // 下面的弹层（版本/队列/定时器）故意留在全局主题 —— 它们是"列表」，不是专辑封面，
-    // 跟着封面色变反而会让「这弹层属于播放器还是属于 App」变得暧昧。
+    // 把**播放器这一屏 + 它的所有弹层**一起包进封面配色里（`playerColors`）。
+    //
+    // 0.1.41 起弹层也跟着变（用户拍板）：播放器是深色沉浸的，如果弹层还留在浅色全局主题，
+    // 一打开就是"深色界面里蹦出一块白板"，比"界限暧昧"难看得多。
     MaterialTheme(colorScheme = playerColors) {
     Column(
         modifier = Modifier
@@ -585,7 +608,10 @@ fun PlayerScreen(
             // 字号照留声器的 full_song_name（24sp / weight500）
             fontSize = 24.sp,
             fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface,
+            // 曲名跟着封面走（用户 0.1.42："部分文字也是显示变化"）。
+            // 这是整屏**唯一**会变色的正文：再往下让行/说明文字也带色相就"发脏"了，
+            // 深底上正文保持中性才耐看。primary 与背景的对比度由自检保证 ≥4.5。
+            color = MaterialTheme.colorScheme.primary,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,
@@ -749,7 +775,6 @@ fun PlayerScreen(
                 icon = Icons.Default.Image,
             ) { showCoverSheet = true }
         }
-    }
     }
 
     // ── 定时器弹层 ──
@@ -1048,6 +1073,45 @@ fun PlayerScreen(
             }
         }
     }
+    }
+}
+
+/**
+ * 播放器打开期间把系统栏图标切成**浅色**。
+ *
+ * 为什么必须做：播放器从 0.1.41 起**永远是深色的**，但 App 的主题可能是浅色
+ * （浅色主题下 MainActivity 会把状态栏图标设成深色）。深底 + 深色图标 = 时间/电量看不见。
+ * 退出时把原值恢复，别把别的界面一起带暗。
+ */
+@Composable
+private fun LightSystemBarIcons() {
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        val context = view.context
+        var probe: android.content.Context? = context
+        var activity: android.app.Activity? = null
+        while (probe is android.content.ContextWrapper) {
+            if (probe is android.app.Activity) {
+                activity = probe
+                break
+            }
+            probe = probe.baseContext
+        }
+        val window = activity?.window
+        val controller = window?.let {
+            androidx.core.view.WindowCompat.getInsetsController(it, view)
+        }
+        val prevStatus = controller?.isAppearanceLightStatusBars
+        val prevNav = controller?.isAppearanceLightNavigationBars
+        controller?.isAppearanceLightStatusBars = false
+        controller?.isAppearanceLightNavigationBars = false
+        onDispose {
+            if (controller != null) {
+                prevStatus?.let { controller.isAppearanceLightStatusBars = it }
+                prevNav?.let { controller.isAppearanceLightNavigationBars = it }
+            }
+        }
+    }
 }
 
 /**
@@ -1070,5 +1134,6 @@ private fun PlayerAction(
         }
     }
 }
+
 
 

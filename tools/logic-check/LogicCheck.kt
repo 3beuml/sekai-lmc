@@ -1,4 +1,4 @@
-﻿import com.pjsk.toolbox.data.card.CardArtPlan
+import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
 import com.pjsk.toolbox.data.card.CardQuery
 import com.pjsk.toolbox.data.card.CardSort
@@ -203,7 +203,8 @@ import com.pjsk.toolbox.data.palette.contrastRatio
 import com.pjsk.toolbox.data.palette.ensureContrast
 import com.pjsk.toolbox.data.palette.hslToArgb
 import com.pjsk.toolbox.data.palette.pickArtworkSeed
-import com.pjsk.toolbox.data.palette.playerPaletteFromPixels
+import com.pjsk.toolbox.data.palette.pickArtworkSeedLoose
+import com.pjsk.toolbox.data.palette.darkPlayerPaletteFromPixels
 import com.pjsk.toolbox.data.palette.relativeLuminance
 import com.pjsk.toolbox.data.palette.rgbToHsl
 import com.pjsk.toolbox.data.palette.whiteOrBlack
@@ -3979,48 +3980,102 @@ check(
     pickArtworkSeed(IntArray(64) { 0x0039C5BB }) == null,
 )
 
-// ── 派生出的调色板：对比度必须达标（否则白字压白底）──
-val lightPalette = playerPaletteFromPixels(mostlyWhiteWithTeal, dark = false)
-val darkPalette = playerPaletteFromPixels(mostlyWhiteWithTeal, dark = true)
-check("浅色主题能派生出调色板", lightPalette != null)
-check("深色主题能派生出调色板", darkPalette != null)
+// ── 深色沉浸式调色板：对比度必须达标（深底 + 亮字，且不能残留原主题色）──
+val darkPalette = darkPlayerPaletteFromPixels(mostlyWhiteWithTeal)
+check("能派生出深色调色板", darkPalette != null)
+val dp = darkPalette!!
 check(
-    "★ 浅色：主色上的图标对比度 ≥ 4.5（播放键里的三角看得清）",
-    contrastRatio(lightPalette!!.onPrimary, lightPalette.primary) >= 4.5,
-    "实际=${contrastRatio(lightPalette.onPrimary, lightPalette.primary)}",
+    "★ 强调色上的图标对比度 ≥ 4.5（播放键里的三角看得清）",
+    contrastRatio(dp.onAccent, dp.accent) >= 4.5,
+    "实际=${contrastRatio(dp.onAccent, dp.accent)}",
 )
 check(
-    "★ 浅色：正文压在渐变两端都 ≥ 4.5",
-    contrastRatio(lightPalette.onSurface, lightPalette.gradientTop) >= 4.5 &&
-        contrastRatio(lightPalette.onSurface, lightPalette.gradientBottom) >= 4.5,
+    "★ 正文压在渐变两端都 ≥ 4.5（深底白字）",
+    contrastRatio(dp.onSurface, dp.gradientTop) >= 4.5 &&
+        contrastRatio(dp.onSurface, dp.gradientBottom) >= 4.5,
 )
 check(
-    "★ 深色：正文压在渐变两端都 ≥ 4.5",
-    contrastRatio(darkPalette!!.onSurface, darkPalette.gradientTop) >= 4.5 &&
-        contrastRatio(darkPalette.onSurface, darkPalette.gradientBottom) >= 4.5,
+    "★ 次要正文压在容器色上 ≥ 4.0",
+    contrastRatio(dp.onSurfaceVariant, dp.surfaceContainer) >= 4.0,
 )
 check(
-    "★ 浅色：渐变上端比下端暗（光从上面来，封面才像浮着）",
-    relativeLuminance(lightPalette.gradientTop) < relativeLuminance(lightPalette.gradientBottom),
+    "★ 强调色在最深背景上仍然可读（进度条就在渐变底部）",
+    contrastRatio(dp.accent, dp.gradientBottom) >= 4.5,
 )
 check(
-    "★ 深色：渐变上端比下端亮",
-    relativeLuminance(darkPalette.gradientTop) > relativeLuminance(darkPalette.gradientBottom),
+    "★ 渐变上端比下端亮（光从上面来，卡片才像浮着）",
+    relativeLuminance(dp.gradientTop) > relativeLuminance(dp.gradientBottom),
 )
 check(
-    "★ 两种主题的主色亮度方向相反（浅色压暗、深色提亮）",
-    relativeLuminance(lightPalette.primary) < relativeLuminance(darkPalette.primary),
+    "★ 整套是**深色**：渐变两端亮度都低（<0.10 / <0.02）",
+    relativeLuminance(dp.gradientTop) < 0.10 && relativeLuminance(dp.gradientBottom) < 0.02,
+)
+check(
+    "★ 表面阶单调递增（Low < Container < High < Highest）",
+    relativeLuminance(dp.surfaceLow) < relativeLuminance(dp.surfaceContainer) &&
+        relativeLuminance(dp.surfaceContainer) < relativeLuminance(dp.surfaceHigh) &&
+        relativeLuminance(dp.surfaceHigh) < relativeLuminance(dp.surfaceHighest),
+)
+check(
+    "★ 强调色比背景亮得多（否则深底上看不见）",
+    relativeLuminance(dp.accent) > relativeLuminance(dp.surfaceHighest) * 4,
+)
+check(
+    "★ 未播轨道（去饱和版）比正文暗、比背景亮",
+    relativeLuminance(dp.fadedTrack) < relativeLuminance(dp.onSurface) &&
+        relativeLuminance(dp.fadedTrack) > relativeLuminance(dp.gradientBottom),
 )
 check(
     "同名输入两次结果一致（纯函数，可缓存）",
-    playerPaletteFromPixels(mostlyWhiteWithTeal, false) == lightPalette,
+    darkPlayerPaletteFromPixels(mostlyWhiteWithTeal) == darkPalette,
 )
 check(
-    "不适合取色的封面 → 调色板为 null（界面退回主题色）",
-    playerPaletteFromPixels(whitePixels, false) == null &&
-        playerPaletteFromPixels(grayPixels, true) == null,
+    "不适合取色的封面 → 调色板为 null（界面回退默认深色）",
+    darkPlayerPaletteFromPixels(whitePixels) == null &&
+        darkPlayerPaletteFromPixels(grayPixels) == null,
+)
+
+// ── 宽松档兜底（0.1.41 实机数据：连续跳 10 首有 8 首严格档返回 null）──
+// 卡面是整幅插画，量化后单色块很难占到 2%，严格档于是集体空手 → 播放器掉回默认紫。
+// 这里造一张"颜色很分散"的图：60 个色块 × 16 px，单块只占 1.6%（< 2%）。
+val spreadPixels = IntArray(60 * 16) { i ->
+    val b = i / 16
+    hslToArgb(b * 6f, 0.62f, 0.30f + (b % 5) * 0.10f)
+}
+check("★ 颜色分散的封面：严格档挑不出种子（单块占比不足 2%）", pickArtworkSeed(spreadPixels) == null)
+val looseSeed = pickArtworkSeedLoose(spreadPixels)
+check(
+    "★ 同一张封面走宽松档能挑出种子（这才是实机大多数卡面的处境）",
+    looseSeed != null,
+    "实际 share=${looseSeed?.share}",
+)
+check(
+    "★ 宽松档下调色板不为 null —— 不再掉回与封面无关的默认深色",
+    darkPlayerPaletteFromPixels(spreadPixels) != null,
+)
+// 低饱和种子（宽容档的常见结果）：强调色必须垫饱和度下限，否则和"没取色"看不出区别
+val washedPixels = IntArray(1000) { i ->
+    if (i % 2 == 0) hslToArgb(205f, 0.12f, 0.50f) else hslToArgb(25f, 0.12f, 0.50f)
+}
+check("低饱和封面严格档也挑不出（饱和 0.12 < 0.28）", pickArtworkSeed(washedPixels) == null)
+val washedPalette = darkPlayerPaletteFromPixels(washedPixels)
+check("低饱和封面仍有调色板（走宽松档）", washedPalette != null)
+check(
+    "★ 低饱和封面的强调色有饱和度下限（不变成灰白）",
+    washedPalette != null &&
+        rgbToHsl(
+            ((washedPalette.accent shr 16) and 0xFF).toFloat(),
+            ((washedPalette.accent shr 8) and 0xFF).toFloat(),
+            (washedPalette.accent and 0xFF).toFloat(),
+        )[1] >= 0.20f,
+)
+check(
+    "★ 纯白/纯灰仍然不取色（宽松档也不该把灰图当有颜色）",
+    darkPlayerPaletteFromPixels(whitePixels) == null &&
+        darkPlayerPaletteFromPixels(grayPixels) == null,
 )
 }
+
 
 
 

@@ -7,20 +7,22 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * 封面取色：从专辑图里抽一个**种子色**，再派生出播放器要用的几个色调。
+ * 封面取色：从专辑图里抽一个**种子色**，再派生出**深色沉浸式**的播放器调色板。
  *
- * ## 为什么不直接用封面上出现最多的那个颜色
+ * ## 为什么整块改成深色（0.1.41）
  *
- * 封面上必然有纯白背景、纯黑描边、大面积灰渐变。直接取"最多的颜色"会得到一个
- * 白的或灰的种子 —— 于是按钮、进度条、标题全变成一坨灰。所以量化之后要**筛**：
- * 丢掉过亮（>0.90）、过暗（<0.10）、低饱和（<0.28）的色簇，再在剩下的里面按
- * 「饱和度 × 出现比例 × 亮度接近 0.55」打分取最高。
+ * 之前的做法是"把浅色界面轻微染色"。这条路容错窗口极窄：底色稍微一染就显脏，
+ * 而且只有少数封面的色相恰好落在甜点 —— 用户的原话是"只有部分封面能做到提取颜色比较适配"。
  *
- * ## 为什么派生而不是直接拿种子当 primary
+ * 深底 + 亮色几乎恒成立。这也是 YouTube Music 那类"怎么都不丑"的真正原因；
+ * 顺带读 `FoedusProgramme/Gramophone`（GPL-3.0，**只读思路、代码未搬**）确认过：
+ * 它的播放器本来就是深色的，而且**根本不做封面取色**，用的是主题色 + HSL 微调。
  *
- * 种子只用来定**色相和大致饱和度**，亮度由主题决定（浅色主题 primary 取 L≈0.40、
- * 渐变顶取 L≈0.90…）。这样无论封面是亮是暗，界面层次都是稳定的 —— 这是
- * 「跟封面变色的界面」看起来不廉价的关键。
+ * ## 为什么角色要派生到这么细
+ *
+ * 之前只覆盖 7 个角色，`secondary` / `tertiary` / `outline` / `surfaceVariant` 还是全局主题的
+ * 初音绿和粉 —— 红色封面配绿次色，**必然"不配"**。这里一次给全，UI 侧整份 `ColorScheme` 派生，
+ * 不留任何原主题色。
  *
  * ## 这一层是纯函数
  *
@@ -36,43 +38,47 @@ data class ArtworkSeed(
     val share: Float,
 )
 
-/**
- * 播放器最终要用的几个颜色（ARGB）。
- *
- * 刻意只暴露这几个、而不是一整套 ColorScheme：能变的**只有播放器这一屏**，
- * 其余界面继续用全局主题。少一个能变的东西，就少一处对比度出问题的可能。
- */
-data class PlayerPaletteArgb(
-    /** 选中的种子色本身（诊断用，界面上不直接用它画东西）。 */
-    val seed: Int,
-    /** 主色：进度条、播放键、定时器高亮。 */
-    val primary: Int,
-    /** 主色上的图标/文字。 */
-    val onPrimary: Int,
-    /** 背景渐变的上端（容器色）。 */
-    val gradientTop: Int,
-    /** 背景渐变的下端（背景色）。 */
-    val gradientBottom: Int,
-    /** 渐变上的主文字。 */
-    val onSurface: Int,
-    /** 渐变上的次要文字。 */
-    val onSurfaceVariant: Int,
-)
-
-// ── 筛选阈值（调这三个数就会改变"哪种封面算合格"）──
+// ── 种子筛选阈值（调这几个数就会改变"哪种封面算合格"）──
 private const val MIN_SATURATION = 0.28f
 private const val MIN_LIGHTNESS = 0.10f
 private const val MAX_LIGHTNESS = 0.90f
 private const val MIN_SHARE = 0.02f
 
-/** 对比度下限：WCAG AA 正文 4.5:1。 */
-private const val MIN_CONTRAST = 4.5
+/** 宽松档的阈值：只在严格档一个桶都挑不出来时才用（见 [pickArtworkSeedLoose]）。 */
+private const val LOOSE_SATURATION = 0.08f
+private const val LOOSE_MIN_SHARE = 0.004f
+private const val LOOSE_MIN_LIGHTNESS = 0.05f
+private const val LOOSE_MAX_LIGHTNESS = 0.95f
 
 /**
- * 选种子。**返回 null 表示这张封面不适合取色**（纯白/纯黑/接近灰度），
- * 调用方应当退回主题色 —— 这比硬算出一个灰界面好。
+ * 选种子（**严格档**）。返回 null 表示这张封面没有一个"又大又艳"的色块。
+ *
+ * 打分 = √(出现比例) × 饱和度 × (1 - |亮度-0.55|×0.8)：
+ * 既不能只取"面积最大但灰"的背景，也不能取"鲜艳但只有几个像素"的点缀。
  */
-fun pickArtworkSeed(pixels: IntArray): ArtworkSeed? {
+fun pickArtworkSeed(pixels: IntArray): ArtworkSeed? =
+    pickSeed(pixels, MIN_SATURATION, MIN_SHARE, MIN_LIGHTNESS, MAX_LIGHTNESS)
+
+/**
+ * 选种子（**宽松档兜底**）。
+ *
+ * 实机统计（0.1.41）：连续跳歌 10 首里 8 首严格档返回 null → 播放器直接掉回默认深色，
+ * 客观上就是"很多封面没取色"。原因很朴素：卡面是整幅插画，量化到 32 级后
+ * **单桶占比很难到 2%**，而饱和度 0.28 也把柔和的画面挡在外面。
+ *
+ * 所以严格档挑不出东西时再走这一档：门槛放宽到能抓住"占面积不大、但确实是画面主色调"的桶。
+ * 宁可拿一个低饱和的种子（深底上几乎就是同色相的中性灰），也不要掉回与封面无关的默认紫。
+ */
+fun pickArtworkSeedLoose(pixels: IntArray): ArtworkSeed? =
+    pickSeed(pixels, LOOSE_SATURATION, LOOSE_MIN_SHARE, LOOSE_MIN_LIGHTNESS, LOOSE_MAX_LIGHTNESS)
+
+private fun pickSeed(
+    pixels: IntArray,
+    minSaturation: Float,
+    minShare: Float,
+    minLightness: Float,
+    maxLightness: Float,
+): ArtworkSeed? {
     if (pixels.isEmpty()) return null
 
     // 每通道量化到 32 级（5 bit）→ 最多 32768 个桶，实际远少于此
@@ -104,10 +110,9 @@ fun pickArtworkSeed(pixels: IntArray): ArtworkSeed? {
         val b = (sumB[key]!! / n).toFloat()
         val hsl = rgbToHsl(r, g, b)
         val share = n.toFloat() / counted
-        if (hsl[1] < MIN_SATURATION) continue
-        if (hsl[2] < MIN_LIGHTNESS || hsl[2] > MAX_LIGHTNESS) continue
-        if (share < MIN_SHARE) continue
-        // 打分：出现得多、够鲜艳、亮度不极端
+        if (hsl[1] < minSaturation) continue
+        if (hsl[2] < minLightness || hsl[2] > maxLightness) continue
+        if (share < minShare) continue
         val score = sqrt(share.toDouble()) * hsl[1] * (1.0 - abs(hsl[2] - 0.55) * 0.8)
         if (score > bestScore) {
             bestScore = score
@@ -118,43 +123,95 @@ fun pickArtworkSeed(pixels: IntArray): ArtworkSeed? {
 }
 
 /**
- * 由像素直接得到播放器调色板；封面不适合取色时返回 null。
+ * 播放器专用的**深色沉浸式**调色板。
  *
- * @param dark 深色主题。深色主题的派生方向和浅色**相反**（primary 要提亮、
- *   背景要压暗），不能用同一套亮度档。
+ * ## 每个角色的用途
+ *
+ * - [accent] / [onAccent]：进度条、播放键、定时器高亮（提亮到 L≈0.78，深底上够跳）
+ * - [accentContainer] / [onAccentContainer]：Play 键填充、选中态底色
+ * - [gradientTop] / [gradientBottom]：背景竖向渐变（上浅下深，光从上面来）
+ * - [surfaceLow]…[surfaceHighest]：容器阶（数字越大越亮）
+ * - [fadedTrack]：未播进度条 —— **去饱和 + 压暗**的派生色
+ *
+ * ## 为什么文字不跟着色相微调
+ *
+ * 深底上的正文如果带色相会显得"发脏"，也难保证对比度。所以 [onSurface] 只留极低饱和，
+ * 让**背景承担色相**、文字只负责可读性。
  */
-fun playerPaletteFromPixels(pixels: IntArray, dark: Boolean): PlayerPaletteArgb? {
-    val seed = pickArtworkSeed(pixels) ?: return null
+data class DarkPlayerPalette(
+    /** 种子色本身（诊断用，不直接画东西）。 */
+    val seed: Int,
+    val accent: Int,
+    val onAccent: Int,
+    val accentContainer: Int,
+    val onAccentContainer: Int,
+    val gradientTop: Int,
+    val gradientBottom: Int,
+    val surfaceLow: Int,
+    val surfaceContainer: Int,
+    val surfaceHigh: Int,
+    val surfaceHighest: Int,
+    val onSurface: Int,
+    val onSurfaceVariant: Int,
+    val outline: Int,
+    val outlineVariant: Int,
+    val fadedTrack: Int,
+)
+
+// ── 深色调色板的亮度档位（想整体调亮/调暗就改这几个数）──
+private const val L_ACCENT = 0.78f
+private const val L_ON_ACCENT = 0.16f
+private const val L_ACCENT_CONTAINER = 0.30f
+private const val L_ON_ACCENT_CONTAINER = 0.90f
+private const val L_GRADIENT_TOP = 0.20f
+private const val L_GRADIENT_BOTTOM = 0.07f
+private const val L_SURFACE_LOW = 0.11f
+private const val L_SURFACE = 0.14f
+private const val L_SURFACE_HIGH = 0.18f
+private const val L_SURFACE_HIGHEST = 0.22f
+private const val L_ON_SURFACE = 0.96f
+private const val L_ON_SURFACE_VARIANT = 0.80f
+private const val L_OUTLINE = 0.55f
+private const val L_OUTLINE_VARIANT = 0.30f
+private const val L_FADED = 0.45f
+
+/**
+ * 由封面像素生成深色调色板；封面连宽松档都挑不出种子时才返回 null
+ * （调用方回退到 **默认深色** 方案，而不是浅色 —— 播放器永远是深的）。
+ */
+fun darkPlayerPaletteFromPixels(pixels: IntArray): DarkPlayerPalette? {
+    // 严格档挑不出来就放宽再来一次：实机上一半以上的卡面需要这一档（见 pickArtworkSeedLoose）
+    val seed = pickArtworkSeed(pixels) ?: pickArtworkSeedLoose(pixels) ?: return null
     val h = seed.hue
     val s = seed.saturation
+    // 低饱和封面（宽松档来的）如果照搬饱和度，强调色会变成灰白，看着和"没取色"一样。
+    // 只给**强调色**垫一个下限：背景阶仍然跟着真实饱和度走，保持中性不出戏。
+    val accentS = max(s, 0.26f)
 
-    return if (dark) {
-        val primary = hslToArgb(h, min(s, 0.78f), 0.80f)
-        val top = hslToArgb(h, s * 0.35f, 0.20f)
-        val bottom = hslToArgb(h, s * 0.22f, 0.08f)
-        PlayerPaletteArgb(
-            seed = hslToArgb(h, s, seed.lightness),
-            primary = primary,
-            onPrimary = ensureContrast(hslToArgb(h, min(s, 0.6f), 0.16f), primary, MIN_CONTRAST),
-            gradientTop = top,
-            gradientBottom = bottom,
-            onSurface = ensureContrast(hslToArgb(h, s * 0.08f, 0.93f), bottom, MIN_CONTRAST),
-            onSurfaceVariant = ensureContrast(hslToArgb(h, s * 0.14f, 0.82f), top, 3.0),
-        )
-    } else {
-        val primary = hslToArgb(h, s.coerceIn(0.35f, 0.88f), 0.40f)
-        val top = hslToArgb(h, s * 0.42f, 0.90f)
-        val bottom = hslToArgb(h, s * 0.18f, 0.97f)
-        PlayerPaletteArgb(
-            seed = hslToArgb(h, s, seed.lightness),
-            primary = primary,
-            onPrimary = ensureContrast(whiteOrBlack(primary), primary, MIN_CONTRAST),
-            gradientTop = top,
-            gradientBottom = bottom,
-            onSurface = ensureContrast(hslToArgb(h, s * 0.10f, 0.11f), bottom, MIN_CONTRAST),
-            onSurfaceVariant = ensureContrast(hslToArgb(h, s * 0.12f, 0.33f), top, 3.0),
-        )
-    }
+    val accent = hslToArgb(h, min(accentS, 0.85f), L_ACCENT)
+    val gradientBottom = hslToArgb(h, s * 0.28f, L_GRADIENT_BOTTOM)
+    val surfaceContainer = hslToArgb(h, s * 0.30f, L_SURFACE)
+    val accentContainer = hslToArgb(h, s * 0.55f, L_ACCENT_CONTAINER)
+
+    return DarkPlayerPalette(
+        seed = hslToArgb(h, s, seed.lightness),
+        // 强调色压在**最深的背景**上要能读（进度条就落在渐变底部区域）
+        accent = ensureContrast(accent, gradientBottom, 4.5),
+        onAccent = ensureContrast(hslToArgb(h, accentS * 0.45f, L_ON_ACCENT), accent, 4.5),
+        accentContainer = accentContainer,
+        onAccentContainer = ensureContrast(hslToArgb(h, s * 0.30f, L_ON_ACCENT_CONTAINER), accentContainer, 4.5),
+        gradientTop = hslToArgb(h, s * 0.45f, L_GRADIENT_TOP),
+        gradientBottom = gradientBottom,
+        surfaceLow = hslToArgb(h, s * 0.30f, L_SURFACE_LOW),
+        surfaceContainer = surfaceContainer,
+        surfaceHigh = hslToArgb(h, s * 0.32f, L_SURFACE_HIGH),
+        surfaceHighest = hslToArgb(h, s * 0.34f, L_SURFACE_HIGHEST),
+        onSurface = ensureContrast(hslToArgb(h, s * 0.04f, L_ON_SURFACE), surfaceContainer, 4.5),
+        onSurfaceVariant = ensureContrast(hslToArgb(h, s * 0.10f, L_ON_SURFACE_VARIANT), surfaceContainer, 4.0),
+        outline = hslToArgb(h, s * 0.15f, L_OUTLINE),
+        outlineVariant = hslToArgb(h, s * 0.20f, L_OUTLINE_VARIANT),
+        fadedTrack = hslToArgb(h, s * 0.18f, L_FADED),
+    )
 }
 
 // ── 颜色小工具（都是纯函数、都被自检覆盖）──
@@ -232,9 +289,9 @@ fun whiteOrBlack(background: Int): Int =
 /**
  * 把前景的亮度往"远离背景"的方向推，直到对比度达标。
  *
- * 为什么需要：种子色的色相/饱和度是不可控的，同一套固定亮度档在某些色相上
- * 会算出对比度不足的组合（例如黄绿色 L=0.40 的 primary 配白字只有 3.1:1）。
- * 与其为每种色相调参数，不如算出结果后**兜底推一把** —— 最多 25 步，每步 0.02。
+ * 为什么需要：种子的色相/饱和度不可控，同一套固定亮度档在某些色相上会算出
+ * 对比度不足的组合（例如黄绿色在 L=0.40 配白字只有 3.1:1）。
+ * 与其为每种色相调参数，不如算出结果后**兜底推一把** —— 最多 25 步，每步 0.04。
  */
 fun ensureContrast(foreground: Int, background: Int, minRatio: Double): Int {
     if (contrastRatio(foreground, background) >= minRatio) return foreground
