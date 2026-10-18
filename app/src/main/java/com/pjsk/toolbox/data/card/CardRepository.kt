@@ -197,6 +197,13 @@ data class CardQuery(
     val units: Set<CardUnit> = emptySet(),
     /** 卡池类型（常驻 / 生日 / 期间限定 / 联动限定…），口径见 [CardSupplyType]。 */
     val supplyTypes: Set<CardSupplyType> = emptySet(),
+    /**
+     * 归属（只在「我的卡牌」里用）：全部 / 已拥有 / 未拥有。
+     *
+     * ⚠️ 它**不算进 [activeCount]**：在「我的卡牌」页里这是"当前模式"而不是筛选项，
+     * 算进去会让顶部冒出「清除筛选」按钮，一点又把模式重置成"全部"。
+     */
+    val ownership: CardOwnership = CardOwnership.ALL,
     val sort: CardSort = CardSort.RELEASE_DESC,
 ) {
     /** 已启用的筛选**维度个数**（不是选中项个数），用于顶部「筛选」按钮上的角标。 */
@@ -211,13 +218,20 @@ data class CardQuery(
         get() = search.isNotBlank() || activeCount > 0
 }
 
+/** 卡的归属筛选。「我的卡牌」页的三态 chip 用它。 */
+enum class CardOwnership(val label: String) {
+    ALL("全部"),
+    OWNED("已拥有"),
+    MISSING("未拥有"),
+}
+
 /**
  * [CardQuery] 的字段个数。
  *
  * 改动字段时**必须同步改这个数**：它是编解码的结构契约，
  * 旧数据对不上就会被 [cardQueryFromSaveText] 整条丢掉并退回默认值（而不是崩）。
  */
-private const val CARD_QUERY_FIELDS = 7
+private const val CARD_QUERY_FIELDS = 8
 
 /**
  * 把筛选条件存成一行文本 / 从一行文本还原。
@@ -237,6 +251,7 @@ fun CardQuery.toSaveText(): String = encodeQueryFields(
     encodeQueryItems(characterIds.map { it.toString() }),
     encodeQueryItems(units.map { it.name }),
     encodeQueryItems(supplyTypes.map { it.name }),
+    ownership.name,
     sort.name,
     search,
 )
@@ -256,8 +271,9 @@ fun cardQueryFromSaveText(raw: String): CardQuery {
         supplyTypes = decodeQueryItems(f[4]).mapNotNullTo(LinkedHashSet()) { name ->
             CardSupplyType.entries.firstOrNull { it.name == name }
         },
-        sort = CardSort.entries.firstOrNull { it.name == f[5] } ?: CardSort.RELEASE_DESC,
-        search = f[6],
+        ownership = CardOwnership.entries.firstOrNull { it.name == f[5] } ?: CardOwnership.ALL,
+        sort = CardSort.entries.firstOrNull { it.name == f[6] } ?: CardSort.RELEASE_DESC,
+        search = f[7],
     )
 }
 
@@ -316,6 +332,13 @@ fun filterCards(
     query: CardQuery,
     caps: Map<String, RarityCap>,
     characterUnits: Map<Int, String?> = emptyMap(),
+    /**
+     * 已拥有的卡 id 集合（「我的卡牌」用）。null = 没有玩家数据，此时归属筛选退化成"全部"。
+     *
+     * ⚠️ 传 null 与传空集**语义不同**：null 是"不知道"，空集是"一张都没有"。
+     * 如果拿空集当默认值，未绑定账号时「已拥有」会显示 0 张而不是退化成全部。
+     */
+    ownedCardIds: Set<Int>? = null,
 ): List<Card> {
     val keyword = query.search.trim()
     val filtered = source.filter { card ->
@@ -339,6 +362,15 @@ fun filterCards(
             // 也不要把它当成常驻塞进「常驻」这一项里（那是编造数据）。
             val supply = card.supplyType ?: return@filter false
             if (supply !in query.supplyTypes) return@filter false
+        }
+        // 归属：没有玩家数据时等于不过滤（见参数说明）
+        if (ownedCardIds != null && query.ownership != CardOwnership.ALL) {
+            val owned = card.id in ownedCardIds
+            when (query.ownership) {
+                CardOwnership.OWNED -> if (!owned) return@filter false
+                CardOwnership.MISSING -> if (owned) return@filter false
+                CardOwnership.ALL -> Unit
+            }
         }
         if (keyword.isNotEmpty()) {
             val hit = card.nameZh?.contains(keyword, ignoreCase = true) == true ||

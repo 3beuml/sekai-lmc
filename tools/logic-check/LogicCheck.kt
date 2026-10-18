@@ -1,4 +1,4 @@
-﻿import com.pjsk.toolbox.data.card.CardArtPlan
+import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
 import com.pjsk.toolbox.data.card.CardQuery
 import com.pjsk.toolbox.data.card.CardSort
@@ -17,6 +17,7 @@ import com.pjsk.toolbox.data.card.characterNameMap
 import com.pjsk.toolbox.data.card.parseCharacter
 import com.pjsk.toolbox.data.card.parseSkill
 import com.pjsk.toolbox.data.card.filterCards
+import com.pjsk.toolbox.data.card.CardOwnership
 import com.pjsk.toolbox.data.card.listTagLabel
 import com.pjsk.toolbox.data.card.supplyType
 import com.pjsk.toolbox.data.card.trainedMaxLevel
@@ -138,6 +139,7 @@ import com.pjsk.toolbox.data.profile.OwnedCard
 import com.pjsk.toolbox.data.profile.normalizeGameId
 import com.pjsk.toolbox.data.profile.parseBondRows
 import com.pjsk.toolbox.data.profile.parseCharacterColors
+import com.pjsk.toolbox.data.profile.parseOwnedCardIds
 import com.pjsk.toolbox.data.profile.parseSnapshot
 import com.pjsk.toolbox.data.profile.parseStyleToBase
 import com.pjsk.toolbox.data.profile.resolveBondPairs
@@ -641,6 +643,99 @@ fun main(args: Array<String>) {
             .characterIds,
         emptySet<Int>(),
     )
+
+    // ─────────────────────────────────────────────────────────
+    section("7b2. 我的卡牌：归属筛选（已拥有 / 未拥有）")
+    // ─────────────────────────────────────────────────────────
+    // 核心防的是**「不知道」被当成「一张都没有」**：`ownedCardIds` 传 null 表示
+    // 「没有玩家数据」，这时归属筛选必须完全不生效；传空集才是"真的一张卡都没有"。
+    // 这两者混淆的现象是：没绑定账号时进「我的卡牌」，看到的不是全图鉴而是一片空。
+    val ownedSampleIds = setOf(1, 3)
+    checkEq(
+        "全部 = 不过滤",
+        filterCards(samples, CardQuery(ownership = CardOwnership.ALL), caps, ownedCardIds = ownedSampleIds)
+            .map { it.id },
+        listOf(1, 2, 3, 4),
+    )
+    checkEq(
+        "已拥有 = 只留持有的",
+        filterCards(samples, CardQuery(ownership = CardOwnership.OWNED), caps, ownedCardIds = ownedSampleIds)
+            .map { it.id },
+        listOf(1, 3),
+    )
+    checkEq(
+        "未拥有 = 只留没有的",
+        filterCards(samples, CardQuery(ownership = CardOwnership.MISSING), caps, ownedCardIds = ownedSampleIds)
+            .map { it.id },
+        listOf(2, 4),
+    )
+    checkEq(
+        "ownedCardIds = null（没有玩家数据）时归属筛选整体失效，退回全图鉴",
+        filterCards(samples, CardQuery(ownership = CardOwnership.OWNED), caps, ownedCardIds = null)
+            .map { it.id },
+        listOf(1, 2, 3, 4),
+    )
+    checkEq(
+        "ownedCardIds = 空集（真的一张都没有）时「已拥有」为空、「未拥有」是全部",
+        listOf(
+            filterCards(samples, CardQuery(ownership = CardOwnership.OWNED), caps, ownedCardIds = emptySet())
+                .size,
+            filterCards(samples, CardQuery(ownership = CardOwnership.MISSING), caps, ownedCardIds = emptySet())
+                .size,
+        ),
+        listOf(0, 4),
+    )
+    checkEq(
+        "归属和别的筛选是「且」（未拥有 + ★4）",
+        filterCards(
+            samples,
+            CardQuery(ownership = CardOwnership.MISSING, rarityKeys = setOf("rarity_4")),
+            caps,
+            ownedCardIds = ownedSampleIds,
+        ).map { it.id },
+        listOf(4),
+    )
+    // activeCount 刻意不算归属：算进去的话「我的卡牌」页会一直亮着「清除筛选」，
+    // 一点又把模式重置成"全部"，是最别扭的一种交互。
+    checkEq(
+        "归属不算进 activeCount / isFiltering（它是模式，不是筛选项）",
+        listOf(
+            CardQuery(ownership = CardOwnership.OWNED).activeCount,
+            CardQuery(ownership = CardOwnership.OWNED).isFiltering,
+        ),
+        listOf(0, false),
+    )
+    checkEq(
+        "归属也进了跨界面保存（往返一致）",
+        cardQueryFromSaveText(CardQuery(ownership = CardOwnership.MISSING).toSaveText()).ownership,
+        CardOwnership.MISSING,
+    )
+    checkEq(
+        "归属枚举名读不出来时退回「全部」，不崩",
+        cardQueryFromSaveText(
+            CardQuery(ownership = CardOwnership.OWNED).toSaveText().replace("OWNED", "WHATEVER"),
+        ).ownership,
+        CardOwnership.ALL,
+    )
+    // 从快照原文里只抽持有卡 id：这一条替代了"为了一个 id 集合把整份快照解析一遍"
+    checkEq(
+        "只抽持有哪些卡（跳过非法行；数字写成字符串也认）",
+        parseOwnedCardIds(
+            """{"userCards":[{"cardId":1},{"cardId":3},{"cardId":0},{"cardId":"7"},{"noId":1}]}""",
+        ),
+        setOf(1, 3, 7),
+    )
+    checkEq(
+        "空 userCards 是**空集**（真的没卡），不是 null",
+        parseOwnedCardIds("""{"userCards":[]}"""),
+        emptySet<Int>(),
+    )
+    checkEq(
+        "完全没有 userCards 字段时返回 null（表示这份原文不可用）",
+        parseOwnedCardIds("""{"userGamedata":{"name":"x"}}"""),
+        null,
+    )
+    checkEq("不是 JSON 时返回 null 而不是崩", parseOwnedCardIds("not json"), null)
 
     // ─────────────────────────────────────────────────────────
     section("7c. 卡池类型标签（cardSupplies）与卡池内的重点卡排序")
@@ -2654,8 +2749,8 @@ fun main(args: Array<String>) {
             { "characterId": 3, "characterRank": 20 }
           ],
           "userBonds": [
-            { "bondsGroupId": 10103, "rank": 8 },
-            { "bondsGroupId": 10102, "rank": 12 }
+            { "bondsGroupId": 10103, "rank": 8, "exp": 120 },
+            { "bondsGroupId": 10102, "rank": 12, "exp": 340 }
           ],
           "userChallengeLiveSoloStages": [
             { "characterId": 17, "challengeLiveStageId": 1601, "rank": 1, "point": 50, "challengeLiveStageStatus": "complete" },
@@ -2707,6 +2802,12 @@ fun main(args: Array<String>) {
 
         checkEq("角色等级条数", snap.characters.size, 3)
         checkEq("羁绊条数", snap.bonds.size, 2)
+        // 羁绊详情要显示"当前等级经验"，所以 exp 必须真的被解析进来（缺字段时给 0）
+        checkEq(
+            "羁绊的经验被解析（有 exp 的取到值，没有的给 0）",
+            sortBonds(snap.bonds).map { it.bondsGroupId to it.exp },
+            listOf(10102 to 340L, 10103 to 120L),
+        )
         checkEq("挑战 Live stage 条数", snap.challengeStages.size, 2)
         check("挑战 Live complete 被识别", snap.challengeStages.first { it.stageId == 1601 }.complete)
         check("挑战 Live in_progress 不算完成", !snap.challengeStages.first { it.stageId == 1603 }.complete)

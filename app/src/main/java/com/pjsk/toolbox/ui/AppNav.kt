@@ -23,6 +23,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -46,6 +49,7 @@ import com.pjsk.toolbox.ui.screen.GachaScreen
 import com.pjsk.toolbox.ui.screen.HomeScreen
 import com.pjsk.toolbox.ui.screen.LyricsScreen
 import com.pjsk.toolbox.ui.screen.MyPlayerScreen
+import com.pjsk.toolbox.ui.screen.MyCardsNotReady
 import com.pjsk.toolbox.ui.screen.SongsScreen
 import com.pjsk.toolbox.ui.screen.MasterListScreen
 import com.pjsk.toolbox.ui.screen.MusicDetailScreen
@@ -78,6 +82,14 @@ object Routes {
      */
     const val BIND_ACCOUNT = "my/bind"
     const val MY_PLAYER = "my"
+
+    /**
+     * 「我的卡牌」= 卡牌图鉴的**同一个界面**，只是多了一档归属筛选（全部 / 已拥有 / 未拥有）。
+     *
+     * 不新写一屏：筛选项、排序、卡面格子全都一样，复制出来的第二份早晚和第一份走岔。
+     * 这一条路由只是「带着玩家数据进图鉴」，数据从本地快照里读。
+     */
+    const val MY_CARDS = "my/cards"
 
     const val ARG_TABLE = "table"
     const val ARG_ID = "id"
@@ -359,7 +371,44 @@ fun AppNav() {
                     onBack = { navController.popBackStack() },
                     onUnbound = { navController.popBackStack() },
                     onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
+                    onOpenMyCards = { navController.navigate(Routes.MY_CARDS) },
                 )
+            }
+
+            composable(Routes.MY_CARDS) {
+                val account by container.appSettings.playerAccount.collectAsState()
+                // 只抽「持有哪些卡」，整个快照不在这条路径上解析（见 PlayerRepository）
+                val owned by produceState<Set<Int>?>(initialValue = null, account) {
+                    value = account?.let { withContext(Dispatchers.IO) {
+                        container.playerRepository.cachedOwnedCardIds(it)
+                    } }
+                }
+                val acc = account
+                if (acc == null) {
+                    // 直达这一屏但没绑定：给一个明确出口，不显示一张空图鉴
+                    MyCardsNotReady(
+                        reason = "还没有绑定账号。",
+                        actionLabel = "去绑定",
+                        onBack = { navController.popBackStack() },
+                    ) { navController.navigate(Routes.BIND_ACCOUNT) }
+                } else {
+                    val ids = owned
+                    if (ids == null) {
+                        MyCardsNotReady(
+                            reason = "本地还没有这份账号的卡牌数据，去「我的」读取一次就有了。",
+                            actionLabel = "去「我的」",
+                            onBack = { navController.popBackStack() },
+                        ) { navController.navigate(Routes.MY_PLAYER) }
+                    } else {
+                        CardListScreen(
+                            region = region,
+                            onOpenDetail = { id -> navController.navigate(Routes.cardDetail(id)) },
+                            onOpenSync = { navController.navigate(Routes.SYNC) },
+                            ownedCardIds = ids,
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+                }
             }
 
             composable(Routes.BIND_ACCOUNT) {

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.FlowRowScope
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material3.Badge
@@ -73,6 +74,7 @@ import com.pjsk.toolbox.PjskApp
 import com.pjsk.toolbox.data.card.Card
 import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
+import com.pjsk.toolbox.data.card.CardOwnership
 import com.pjsk.toolbox.data.card.CardQuery
 import com.pjsk.toolbox.data.card.CardSort
 import com.pjsk.toolbox.data.card.CardSupplyType
@@ -137,6 +139,17 @@ fun CardListScreen(
      * 改过的筛选项不会被这个预设值覆盖（这正是上一轮修的那个 bug）。
      */
     initialCharacterId: Int? = null,
+    /**
+     * 已拥有的卡 id 集合。**null = 不是「我的卡牌」模式**，此时不显示归属筛选条。
+     *
+     * 同一个界面两用（图鉴 / 我的卡牌），而不是复制一份 —— 筛选项、排序、卡面格子
+     * 全都一样，复制出来的第二份早晚会和第一份走岔。
+     */
+    ownedCardIds: Set<Int>? = null,
+    /** 「我的卡牌」进来时默认落在哪一档（入口分「已拥有」「未拥有」两个）。 */
+    initialOwnership: CardOwnership = CardOwnership.OWNED,
+    /** 非空时左上角显示返回箭头（图鉴是底部导航直达的顶级页，没有返回）。 */
+    onBack: (() -> Unit)? = null,
 ) {
     val container = (LocalContext.current.applicationContext as PjskApp).container
     val repository = container.cardRepository
@@ -151,7 +164,11 @@ fun CardListScreen(
     // 初始化时若带了预设角色（从歌曲详情点演唱者过来），就先把这一维选上。
     var query by rememberSaveable(stateSaver = CardQuerySaver) {
         mutableStateOf(
-            initialCharacterId?.let { CardQuery(characterIds = setOf(it)) } ?: CardQuery(),
+            if (ownedCardIds != null) {
+                CardQuery(ownership = initialOwnership)
+            } else {
+                initialCharacterId?.let { CardQuery(characterIds = setOf(it)) } ?: CardQuery()
+            },
         )
     }
     // 顶栏搜索框是否展开。**纯临时状态**：返回这一屏时不该自己弹出来，所以用 remember
@@ -167,8 +184,13 @@ fun CardListScreen(
         characters.associate { it.id to it.displayNameFor(nameLanguage) }
     }
 
-    val visible = remember(cards, query, rarityCaps, characterUnits) {
-        filterCards(cards, query, rarityCaps, characterUnits)
+    val visible = remember(cards, query, rarityCaps, characterUnits, ownedCardIds) {
+        filterCards(cards, query, rarityCaps, characterUnits, ownedCardIds)
+    }
+
+    // 「我的卡牌」顶部那行进度用的两个基数：不受任何筛选影响的持有量 / 全部卡量
+    val ownedTotal = remember(cards, ownedCardIds) {
+        ownedCardIds?.let { owned -> cards.count { it.id in owned } } ?: 0
     }
 
     // 筛选面板里「组合 → 角色」的分组。必须按**卡**统计，不能按角色的 unit 字段分组：
@@ -187,6 +209,13 @@ fun CardListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        }
+                    }
+                },
                 title = {
                     if (searchOpen) {
                         CardSearchField(
@@ -195,11 +224,16 @@ fun CardListScreen(
                         )
                     } else {
                         Column {
-                            Text("卡牌图鉴", style = MaterialTheme.typography.titleLarge)
+                            Text(
+                                text = if (ownedCardIds != null) "我的卡牌" else "卡牌图鉴",
+                                style = MaterialTheme.typography.titleLarge,
+                            )
                             // 计数并进标题第二行，省掉原本常驻的一整行
                             Text(
                                 text = if (query.isFiltering) {
                                     "筛选出 ${visible.size} / ${cards.size} 张"
+                                } else if (ownedCardIds != null) {
+                                    "已持有 $ownedTotal / ${cards.size} 张"
                                 } else {
                                     "共 ${cards.size} 张"
                                 },
@@ -209,8 +243,8 @@ fun CardListScreen(
                         }
                     }
                 },
-                // ⚠️ 刻意**没有返回箭头**：卡牌是底部导航直达的顶级板块，
-                // 不该出现"返回到哪"的箭头。返回键由系统处理。
+                // 返回箭头只在「我的卡牌」模式下出现（由 onBack 是否为 null 决定）：
+                // 图鉴是底部导航直达的顶级板块，不该出现"返回到哪"的箭头。
                 actions = {
                     IconButton(
                         onClick = {
@@ -274,8 +308,36 @@ fun CardListScreen(
                 return@Column
             }
 
+            // 「我的卡牌」的归属切换：全部 / 已拥有 / 未拥有。
+            // 三档互斥，所以用一组 FilterChip 而不是把「归属」塞进筛选面板 ——
+            // 这是这一屏最常用的一维，藏进面板会让「我有哪些卡没抽到」多一次点击。
+            if (ownedCardIds != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CardOwnership.entries.forEach { option ->
+                        val count = when (option) {
+                            CardOwnership.ALL -> cards.size
+                            CardOwnership.OWNED -> ownedTotal
+                            CardOwnership.MISSING -> cards.size - ownedTotal
+                        }
+                        FilterChip(
+                            selected = query.ownership == option,
+                            onClick = { query = query.copy(ownership = option) },
+                            label = { Text("${option.label} $count") },
+                        )
+                    }
+                }
+            }
+
             // 筛选激活时留一行「清除筛选」的快捷出口。
             // 平时不显示 —— 计数已经并进标题，条件都收进筛选面板了。
+            // ⚠️ 归属不算「筛选」（activeCount 不算它），所以清除时要把归属还原成
+            // 进来时那一档，否则在「已拥有」里点清除会静默变成「全部」。
             if (query.isFiltering) {
                 Row(
                     modifier = Modifier
@@ -284,12 +346,27 @@ fun CardListScreen(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TextButton(onClick = { query = CardQuery() }) { Text("清除筛选") }
+                    TextButton(
+                        onClick = {
+                            query = if (ownedCardIds != null) {
+                                CardQuery(ownership = initialOwnership)
+                            } else {
+                                CardQuery()
+                            }
+                        },
+                    ) { Text("清除筛选") }
                 }
             }
 
             if (visible.isEmpty()) {
-                EmptyState(title = "没有符合条件的卡牌", description = "试着放宽筛选条件。")
+                EmptyState(
+                    title = "没有符合条件的卡牌",
+                    description = if (query.ownership == CardOwnership.MISSING) {
+                        "这个筛选下你已经全部集齐了。"
+                    } else {
+                        "试着放宽筛选条件。"
+                    },
+                )
                 return@Column
             }
 
@@ -340,6 +417,45 @@ fun CardListScreen(
             totalCount = cards.size,
             onDismiss = { showFilterSheet = false },
         )
+    }
+}
+
+/**
+ * 「我的卡牌」进不来时的两种前置状态：没绑定账号 / 本地没有这份账号的卡牌数据。
+ *
+ * 为什么不直接渲染空图鉴：那会显示「共 0 张」或干脆全量卡牌，用户会以为自己的卡丢了。
+ * 这里明确说清缺什么、下一步点哪里。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MyCardsNotReady(
+    reason: String,
+    actionLabel: String,
+    onBack: (() -> Unit)? = null,
+    onAction: () -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("我的卡牌") },
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        }
+                    }
+                },
+            )
+        },
+    ) { padding ->
+        Box(modifier = Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.Center) {
+            EmptyState(
+                title = "暂时看不到我的卡牌",
+                description = reason,
+                actionLabel = actionLabel,
+                onAction = onAction,
+            )
+        }
     }
 }
 

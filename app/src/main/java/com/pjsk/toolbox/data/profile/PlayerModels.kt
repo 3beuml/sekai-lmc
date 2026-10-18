@@ -60,8 +60,17 @@ data class MaterialAmount(val materialId: Int, val quantity: Int)
 /** 角色等级（`userCharacters`）。 */
 data class OwnedCharacter(val characterId: Int, val characterRank: Int)
 
-/** 羁绊（`userBonds`）。`bondsGroupId` 是组 id，**内置表里没有对应的组名表**，只能拿 id 展示。 */
-data class OwnedBond(val bondsGroupId: Int, val rank: Int)
+/**
+ * 羁绊（`userBonds`）。`bondsGroupId` 是组 id。
+ *
+ * 组名不在这张表里 —— 靠「[bondGroupIdOf] 反解出两个角色 + `gameCharacters` 的名字」
+ * 拼出来（见 [resolveBondPairs]），所以不需要额外下载组名表。
+ *
+ * [exp] 是**当前等级内的经验**（不是总经验）。上游给的是 `exp`，实测存在；
+ * 缺字段时给 0。展示成「升级进度」需要各级的门槛经验（`levels.json`），
+ * 现在没内置，所以界面只把它当数字显示，不做百分比。
+ */
+data class OwnedBond(val bondsGroupId: Int, val rank: Int, val exp: Long = 0L)
 
 /** 挑战 Live 的一个 stage（`userChallengeLiveSoloStages`）。 */
 data class ChallengeStage(
@@ -360,6 +369,26 @@ private val lenientJson = Json { ignoreUnknownKeys = true; isLenient = true }
  * `upload_time` 上游可能给秒也可能是毫秒（社区里两种都见过）：这里按月小于 `1e12`
  * 判为秒并换算成秒，避免界面上算出 1970 年。
  */
+/**
+ * 从一份快照原文里只抽出**持有哪些卡**，给卡牌图鉴的「我的卡牌」模式用。
+ *
+ * 为什么不复用 [parseSnapshot]：那一份会把卡牌、歌曲成绩、材料、羁绊、挑战 Live
+ * 全解析一遍（几千条对象），而这里只要一个 id 集合 —— 这一屏每次进入都要算。
+ *
+ * 返回 null = 这份原文根本不可用（不是 JSON 对象，或没有 `userCards` 数组）；
+ * **空集是合法结果**（真的没卡），调用方必须区分这两者。
+ */
+fun parseOwnedCardIds(raw: String): Set<Int>? {
+    val root = runCatching { lenientJson.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return null
+    val cards = root["userCards"] as? JsonArray ?: return null
+    val out = HashSet<Int>(cards.size * 2)
+    for (el in cards) {
+        val id = (el as? JsonObject)?.int("cardId") ?: 0
+        if (id > 0) out.add(id)
+    }
+    return out
+}
+
 fun parseSnapshot(raw: String, account: PlayerAccount): PlayerSnapshot? {
     val root = runCatching { lenientJson.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return null
     val gamedata = root.obj("userGamedata") ?: return null
@@ -423,7 +452,7 @@ fun parseSnapshot(raw: String, account: PlayerAccount): PlayerSnapshot? {
         bonds = root.array("userBonds").mapNotNull { it as? JsonObject }.mapNotNull { b ->
             val id = b.int("bondsGroupId")
             if (id <= 0) return@mapNotNull null
-            OwnedBond(bondsGroupId = id, rank = b.int("rank"))
+            OwnedBond(bondsGroupId = id, rank = b.int("rank"), exp = b.long("exp"))
         },
         challengeStages = root.array("userChallengeLiveSoloStages").mapNotNull { it as? JsonObject }
             .mapNotNull { s ->

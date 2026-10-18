@@ -2,17 +2,22 @@ package com.pjsk.toolbox.ui.screen
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,11 +32,13 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -56,6 +63,7 @@ import com.pjsk.toolbox.PjskApp
 import com.pjsk.toolbox.data.card.Card
 import com.pjsk.toolbox.data.card.PjskCharacter
 import com.pjsk.toolbox.data.card.displayNameFor
+import com.pjsk.toolbox.data.profile.BondPair
 import com.pjsk.toolbox.data.profile.DifficultyStat
 import com.pjsk.toolbox.data.profile.OwnedBond
 import com.pjsk.toolbox.data.profile.OwnedCharacter
@@ -113,6 +121,8 @@ fun MyPlayerScreen(
     onBack: () -> Unit,
     onUnbound: () -> Unit,
     onOpenBind: () -> Unit,
+    /** 「卡牌」模块点进去 → 卡牌图鉴的「我的卡牌」模式（已拥有 / 未拥有）。 */
+    onOpenMyCards: () -> Unit,
 ) {
     val context = LocalContext.current
     val container = (context.applicationContext as PjskApp).container
@@ -136,6 +146,12 @@ fun MyPlayerScreen(
     var snapshot by remember(account) { mutableStateOf(account?.let { repo.loadCached(it) }) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    // 羁绊面板的当前层级。放在 Scaffold 外面，因为面板本身要画在整页之上。
+    var sheet by remember(account) { mutableStateOf<BondSheetState>(BondSheetState.None) }
+
+    // 这几个提到 Scaffold 外面：羁绊面板画在 Scaffold 之后，拿不到 Column 内部的局部变量。
+    val region = account?.let { ServerRegion.fromId(it.server) } ?: ServerRegion.DEFAULT
+    val charsById = remember(allCharacters) { allCharacters.associateBy { it.id } }
 
     // 解绑：清偏好 + 删本地快照，然后返回上一页。
     val doUnbind: () -> Unit = {
@@ -222,17 +238,16 @@ fun MyPlayerScreen(
                 return@Column
             }
 
-            val region = ServerRegion.fromId(acc.server)
             val cardsById = remember(allCards) { allCards.associateBy { it.id } }
-            val charsById = remember(allCharacters) { allCharacters.associateBy { it.id } }
             val leaderCard = cardsById[snap.deckLeaderCardId]
             val accent = remember(leaderCard, unitColors, charsById) {
                 unitColorOf(leaderCard, charsById, unitColors) ?: Color(0xFF6750A4)
             }
+            val bondsAll = remember(snap.bonds) { sortBonds(snap.bonds) }
 
             HeroCard(snap = snap, server = acc.server, region = region, leaderCard = leaderCard, accent = accent)
 
-            CardModule("卡牌") {
+            CardModule("卡牌", actionLabel = "我的卡牌", onAction = onOpenMyCards) {
                 val stats = cardStats(snap.cards)
                 TripleStat(
                     a = "已持有" to "${stats.owned}",
@@ -301,23 +316,32 @@ fun MyPlayerScreen(
                 }
             }
 
-            CardModule("羁绊") {
-                val bonds = sortBonds(snap.bonds)
+            CardModule(
+                title = "羁绊",
+                // 只列前 8 组，其余用一个入口 —— 31 组一次性铺开会把下面的按钮推出屏外。
+                actionLabel = if (bondsAll.size > BOND_PREVIEW) "全部 ${bondsAll.size} 组" else null,
+                onAction = { sheet = BondSheetState.All },
+            ) {
+                val bonds = bondsAll
                 if (bonds.isEmpty()) {
                     HintText("快照里没有羁绊数据。")
                 } else {
-                    val shown = bonds.take(8)
+                    val shown = bonds.take(BOND_PREVIEW)
                     val maxRank = shown.maxOf { it.rank }.coerceAtLeast(1)
                     shown.forEach { bond ->
-                        val pair = bondPairs[bond.bondsGroupId]
-                        // 组名靠 master data 翻译（bonds.json + gameCharacterUnits），
-                        // 表没下全时退回组 id —— 但绝不显示成"什么都不是"。
-                        val label = bondLabel(pair, charsById, nameLanguage)
-                            ?: "#${bond.bondsGroupId}"
-                        BondBarRow(label = label, rank = bond.rank, maxRank = maxRank)
+                        BondRowItem(
+                            bond = bond,
+                            pair = bondPairs[bond.bondsGroupId],
+                            charsById = charsById,
+                            characterColors = characterColors,
+                            nameLanguage = nameLanguage,
+                            maxRank = maxRank,
+                            // 组名翻不出来也不必禁点：详情里仍然能看到组 id 和等级
+                            onClick = { sheet = BondSheetState.Detail(bond.bondsGroupId) },
+                        )
                     }
                     if (bonds.size > shown.size) {
-                        HintText("其余 ${bonds.size - shown.size} 组按等级排在后面")
+                        HintText("其余 ${bonds.size - shown.size} 组按等级排在后面，点上面的「全部」看完整列表")
                     }
                 }
             }
@@ -337,15 +361,41 @@ fun MyPlayerScreen(
             Spacer(Modifier.height(24.dp))
         }
     }
+
+    // 羁绊面板。全页级的浮层，所以放在 Scaffold 之后而不是模块内部 ——
+    // 模块里有 verticalScroll，塞在里面的浮层会被父级的滚动裁切。
+    if (sheet != BondSheetState.None) {
+        BondSheet(
+            state = sheet,
+            bonds = remember(snapshot) { sortBonds(snapshot?.bonds.orEmpty()) },
+            bondPairs = bondPairs,
+            charsById = charsById,
+            characterColors = characterColors,
+            nameLanguage = nameLanguage,
+            region = region,
+            onNavigate = { sheet = it },
+            onDismiss = { sheet = BondSheetState.None },
+        )
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
 // 模块
 // ─────────────────────────────────────────────────────────────
 
-/** 一个模块卡片：标题 + 内容。 */
+/**
+ * 一个模块卡片：标题 +（可选的）右上角入口 + 内容。
+ *
+ * [actionLabel] 非空时右上角出现一个文字按钮 —— 比"整张卡片都能点"更明确：
+ * 模块里还有图表，整块可点会让用户不知道点了会发生什么。
+ */
 @Composable
-private fun CardModule(title: String, content: @Composable () -> Unit) {
+private fun CardModule(
+    title: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -353,12 +403,24 @@ private fun CardModule(title: String, content: @Composable () -> Unit) {
         ),
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (actionLabel != null && onAction != null) {
+                    // 负内边距靠 TextButton 自己的最小尺寸压住，视觉上贴着卡片右上角
+                    TextButton(onClick = onAction, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Text(actionLabel, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+            Spacer(Modifier.height(if (actionLabel != null) 4.dp else 10.dp))
             content()
         }
     }
@@ -536,15 +598,306 @@ private fun MusicBarRow(stat: DifficultyStat, max: Int, accent: Color) {
     )
 }
 
+// ─────────────────────────────────────────────────────────────
+// 羁绊：一行 + 面板 + 详情
+// ─────────────────────────────────────────────────────────────
+
+/** 「我的」页里先列几组羁绊（其余进「全部」面板）。 */
+private const val BOND_PREVIEW = 8
+
+/**
+ * 羁绊面板的层级。
+ *
+ * 一个 `ModalBottomSheet` 内部换内容，而不是叠两个 sheet：
+ * 嵌套 sheet 在 Compose 里会盖住父 sheet 的拖拽手柄，返回也说不清回到哪一层。
+ */
+private sealed interface BondSheetState {
+    data object None : BondSheetState
+
+    /** 全部羁绊（按等级降序）。 */
+    data object All : BondSheetState
+
+    /** 某一组的详情。 */
+    data class Detail(val groupId: Int) : BondSheetState
+}
+
+/**
+ * 一行羁绊：上面「两个色点 + 组名 + 等级」，下面一条进度。
+ *
+ * ## 为什么名字单独占一整行（这是上一版的问题）
+ * 旧版把名字塞进 `BarRow` 的 `labelWidth = 120dp` 里，而一行里还有进度条和「Lv.N」，
+ * 于是「星乃一歌 & 望月穗波」这种 10 个字的组名必然被截成「星乃一歌 & 望月…」——
+ * 恰恰是**确认"这是谁和谁"最需要的那半个字**被截掉了。
+ * 现在进度条挪到第二行，名字拿到除「Lv.N」之外的整行宽度，正常长度的组名不会再截。
+ *
+ * 名字前面两个**角色主题色圆点**是第二重保障：即使名字仍然被截，颜色也能立刻对上人
+ * （颜色来自 `gameCharacterUnits.colorCode`，不是编的）。
+ */
 @Composable
-private fun BondBarRow(label: String, rank: Int, maxRank: Int) {
-    BarRow(
-        label = label,
-        fraction = rank.toFloat() / maxRank,
-        color = MaterialTheme.colorScheme.tertiary,
-        valueText = "Lv.$rank",
-        labelWidth = 120,
+private fun BondRowItem(
+    bond: OwnedBond,
+    pair: BondPair?,
+    charsById: Map<Int, PjskCharacter>,
+    characterColors: Map<Int, String>,
+    nameLanguage: NameLanguage,
+    maxRank: Int,
+    onClick: () -> Unit,
+) {
+    val label = bondLabel(pair, charsById, nameLanguage) ?: "#${bond.bondsGroupId}"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (pair != null) {
+                BondDot(characterColors[pair.characterIdSmall])
+                Spacer(Modifier.width(3.dp))
+                BondDot(characterColors[pair.characterIdLarge])
+                Spacer(Modifier.width(7.dp))
+            }
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "Lv.${bond.rank}",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
+        }
+        Spacer(Modifier.height(3.dp))
+        Bar(fraction = bond.rank.toFloat() / maxRank.coerceAtLeast(1))
+    }
+}
+
+/** 角色主题色小圆点。取不到颜色时留一个中性灰点（不隐藏，保持两边的对齐）。 */
+@Composable
+private fun BondDot(hex: String?) {
+    Box(
+        modifier = Modifier
+            .size(7.dp)
+            .clip(CircleShape)
+            .background(parseHexColor(hex) ?: MaterialTheme.colorScheme.outline),
     )
+}
+
+/** 纯进度条（羁绊行第二行用；`BarRow` 那条是「标签 + 条 + 数值」的三段式）。 */
+@Composable
+private fun Bar(fraction: Float, color: Color = MaterialTheme.colorScheme.tertiary) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(8.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                .height(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(color),
+        )
+    }
+}
+
+/**
+ * 羁绊面板：[BondSheetState.All] 列全部，[BondSheetState.Detail] 看一组。
+ *
+ * 详情里能给出的都是**已有数据**：两个角色（头像 + 名字 + 角色等级）、羁绊等级、
+ * 当前等级内的经验。**不显示"满级"或"升级还差多少"** —— 那需要各级门槛经验
+ * （`levels.json`），现在没有内置，硬算就是编数据。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BondSheet(
+    state: BondSheetState,
+    bonds: List<OwnedBond>,
+    bondPairs: Map<Int, BondPair>,
+    charsById: Map<Int, PjskCharacter>,
+    characterColors: Map<Int, String>,
+    nameLanguage: NameLanguage,
+    region: ServerRegion,
+    onNavigate: (BondSheetState) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        val maxRank = bonds.maxOfOrNull { it.rank }?.coerceAtLeast(1) ?: 1
+        when (state) {
+            BondSheetState.None -> Unit
+
+            BondSheetState.All -> {
+                SheetHeader(
+                    title = "全部羁绊",
+                    subtitle = "${bonds.size} 组 · 从高到低",
+                )
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+                ) {
+                    items(bonds, key = { it.bondsGroupId }) { bond ->
+                        BondRowItem(
+                            bond = bond,
+                            pair = bondPairs[bond.bondsGroupId],
+                            charsById = charsById,
+                            characterColors = characterColors,
+                            nameLanguage = nameLanguage,
+                            maxRank = maxRank,
+                            onClick = { onNavigate(BondSheetState.Detail(bond.bondsGroupId)) },
+                        )
+                    }
+                }
+            }
+
+            is BondSheetState.Detail -> {
+                val bond = bonds.firstOrNull { it.bondsGroupId == state.groupId }
+                val pair = bondPairs[state.groupId]
+                SheetHeader(
+                    title = bondLabel(pair, charsById, nameLanguage) ?: "羁绊 #${state.groupId}",
+                    subtitle = "羁绊等级 Lv.${bond?.rank ?: 0}",
+                    onBack = { onNavigate(BondSheetState.All) },
+                )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 20.dp),
+                ) {
+                    if (pair == null) {
+                        HintText("内置数据里没找到这一组的角色对，可能是数据表还没同步完整。")
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
+                            BondCharacterCard(
+                                characterId = pair.characterIdSmall,
+                                charsById = charsById,
+                                characterColors = characterColors,
+                                nameLanguage = nameLanguage,
+                                region = region,
+                                modifier = Modifier.weight(1f),
+                            )
+                            BondCharacterCard(
+                                characterId = pair.characterIdLarge,
+                                charsById = charsById,
+                                characterColors = characterColors,
+                                nameLanguage = nameLanguage,
+                                region = region,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    if (bond != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "Lv.${bond.rank}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                "当前等级经验 ${bond.exp}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Bar(fraction = bond.rank.toFloat() / maxRank.coerceAtLeast(1))
+                        Spacer(Modifier.height(6.dp))
+                        HintText(
+                            "进度条按「这一组相对你最高那一组」的比例画；" +
+                                "升级还差多少经验需要各级门槛表，暂未内置。",
+                        )
+                    }
+                    Spacer(Modifier.height(20.dp))
+                }
+            }
+        }
+    }
+}
+
+/** 面板顶部一行：返回（可选）+ 标题 + 副标题。 */
+@Composable
+private fun SheetHeader(title: String, subtitle: String?, onBack: (() -> Unit)? = null) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 20.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (onBack != null) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回全部羁绊")
+            }
+        } else {
+            Spacer(Modifier.width(20.dp))
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            if (subtitle != null) {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** 详情里的一个角色：头像 + 名字 +（有数据时）角色等级。 */
+@Composable
+private fun BondCharacterCard(
+    characterId: Int,
+    charsById: Map<Int, PjskCharacter>,
+    characterColors: Map<Int, String>,
+    nameLanguage: NameLanguage,
+    region: ServerRegion,
+    modifier: Modifier = Modifier,
+) {
+    val color = parseHexColor(characterColors[characterId]) ?: MaterialTheme.colorScheme.primary
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier
+                .size(88.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(color.copy(alpha = 0.30f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            AsyncImage(
+                model = AssetUrls.characterAvatar(region, characterId),
+                contentDescription = charsById[characterId]?.displayNameFor(nameLanguage),
+                // 和「角色等级」那 26 格一样：这张图是 376×840 的竖版立绘，顶部对齐才看得到头
+                contentScale = ContentScale.Crop,
+                alignment = Alignment.TopCenter,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = charsById[characterId]?.displayNameFor(nameLanguage) ?: "#$characterId",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = charsById[characterId]?.unitLabel.orEmpty(),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 /**
@@ -553,7 +906,7 @@ private fun BondBarRow(label: String, rank: Int, maxRank: Int) {
  * 名字跟随 App 的「名称语言」设置，和卡牌页、剧情页一致。
  */
 private fun bondLabel(
-    pair: com.pjsk.toolbox.data.profile.BondPair?,
+    pair: BondPair?,
     charsById: Map<Int, PjskCharacter>,
     nameLanguage: NameLanguage,
 ): String? {

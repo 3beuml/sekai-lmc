@@ -62,6 +62,22 @@ class PlayerRepository(
     }
 
     /**
+     * 只取「持有哪些卡」—— 给卡牌图鉴的「我的卡牌」模式用。
+     *
+     * 刻意**不走 [loadCached]**：那一份会把卡牌、歌曲成绩、材料、羁绊全解析一遍，
+     * 而这里只要 `userCards` 的 id。读的还是同一份缓存文件（原始 JSON），
+     * 所以两者不会不同步。
+     *
+     * 返回 null = 没有缓存（没绑定，或绑了但从没读取成功过）。
+     * ⚠️ 这不等于「一张卡都没有」—— 空集才表示后者，调用方必须区分。
+     */
+    fun cachedOwnedCardIds(account: PlayerAccount): Set<Int>? = runCatching {
+        val f = File(dir, account.cacheFileName)
+        if (!f.isFile) return null
+        parseOwnedCardIds(f.readText())
+    }.getOrNull()
+
+    /**
      * 联网拉一份新快照。成功后**顺手写盘**，失败不动旧缓存
      * （旧快照比没有好，界面会显示它的时间）。
      */
