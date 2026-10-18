@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.ui
+﻿package com.pjsk.toolbox.ui
 
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.unit.dp
@@ -39,6 +39,7 @@ import com.pjsk.toolbox.PjskApp
 import com.pjsk.toolbox.data.story.StoryType
 import com.pjsk.toolbox.ui.screen.AboutScreen
 import com.pjsk.toolbox.ui.screen.Best30Screen
+import com.pjsk.toolbox.ui.screen.DeckScreen
 import com.pjsk.toolbox.ui.screen.BindAccountScreen
 import com.pjsk.toolbox.ui.screen.CardDetailScreen
 import com.pjsk.toolbox.ui.screen.CardEpisodeScreen
@@ -108,6 +109,13 @@ object Routes {
      * 塞进浮层只能看到 7 条，且曲绘会被压得很小。
      */
     const val MY_BEST30 = "my/best30"
+
+    /**
+     * 「编成」：游戏里存的几套编成，逐套摊开看 5 张卡（带卡图标/等级/突破）+ 各自的综合力。
+     *
+     * 加这一屏的直接原因：用户反馈「综合力只能看到 5 张卡，看不到是哪几张」。
+     */
+    const val MY_DECKS = "my/decks"
 
     const val ARG_TABLE = "table"
     const val ARG_ID = "id"
@@ -392,6 +400,7 @@ fun AppNav() {
                     onOpenMyCards = { navController.navigate(Routes.MY_CARDS) },
                     onOpenMyMusic = { navController.navigate(Routes.MY_MUSIC) },
                     onOpenBest30 = { navController.navigate(Routes.MY_BEST30) },
+                    onOpenMyDecks = { navController.navigate(Routes.MY_DECKS) },
                 )
             }
 
@@ -454,6 +463,15 @@ fun AppNav() {
                 )
             }
 
+            composable(Routes.MY_DECKS) {
+                DeckScreen(
+                    region = region,
+                    onBack = { navController.popBackStack() },
+                    onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
+                    onOpenMyPlayer = { navController.navigate(Routes.MY_PLAYER) },
+                    onOpenCard = { cardId -> navController.navigate(Routes.cardDetail(cardId)) },
+                )
+            }
             composable(Routes.BIND_ACCOUNT) {
                 BindAccountScreen(
                     onBack = { navController.popBackStack() },
@@ -772,3 +790,4 @@ fun AppNav() {
         }
     }
 }
+

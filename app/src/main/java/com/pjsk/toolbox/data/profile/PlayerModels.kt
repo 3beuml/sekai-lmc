@@ -83,6 +83,19 @@ data class OwnedAreaItem(val areaItemId: Int, val level: Int)
 data class OwnedHonor(val honorId: Int, val level: Int)
 
 /**
+ * 一套编成（`userDecks` 的一行）。
+ *
+ * [cardIds] 最多 5 张（游戏里一套编成就是 5 张，见 [currentDeckCardIds] 的说明）。
+ * [isCurrent] = 这套是不是 `userGamedata.deck` 指向的那套（也就是游戏里正在用的）。
+ */
+data class PlayerDeck(
+    val deckId: Int,
+    val name: String,
+    val cardIds: List<Int>,
+    val isCurrent: Boolean,
+)
+
+/**
  * 羁绊（`userBonds`）。`bondsGroupId` 是组 id。
  *
  * 组名不在这张表里 —— 靠「[bondGroupIdOf] 反解出两个角色 + `gameCharacters` 的名字」
@@ -138,6 +151,8 @@ data class PlayerSnapshot(
      * 空列表 = 快照里没有编成数据（那时综合力整块不显示，而不是算出一个 0）。
      */
     val deckCardIds: List<Int> = emptyList(),
+    /** 快照里保存的**全部**编成（游戏内最多 4 套）。「编成」页要逐套展示 + 各算一份综合力。 */
+    val decks: List<PlayerDeck> = emptyList(),
 )
 
 // ─────────────────────────────────────────────────────────────
@@ -521,6 +536,18 @@ fun parseSnapshot(raw: String, account: PlayerAccount): PlayerSnapshot? {
             OwnedHonor(honorId = honorId, level = h.int("level"))
         },
         deckCardIds = currentDeckCardIds(currentDeck),
+        decks = decks
+            .mapNotNull { row ->
+                val deckId = row.int("deckId")
+                if (deckId <= 0) return@mapNotNull null
+                PlayerDeck(
+                    deckId = deckId,
+                    name = row.str("name").orEmpty(),
+                    cardIds = currentDeckCardIds(row),
+                    isCurrent = deckId == currentDeckId,
+                )
+            }
+            .sortedBy { it.deckId },
     )
 }
 

@@ -1,4 +1,4 @@
-﻿package com.pjsk.toolbox.ui.screen
+package com.pjsk.toolbox.ui.screen
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -140,6 +140,8 @@ fun MyPlayerScreen(
     onOpenMyMusic: () -> Unit,
     /** Best30 模块点进去 → 独立页面（带曲绘的 30 条完整列表）。 */
     onOpenBest30: () -> Unit,
+    /** 「编成」页：逐套摊开看 5 张卡 + 各自的综合力。 */
+    onOpenMyDecks: () -> Unit,
 ) {
     val context = LocalContext.current
     val container = (context.applicationContext as PjskApp).container
@@ -451,7 +453,12 @@ fun MyPlayerScreen(
             // ── 综合力 ──
             // 只有在「编成有卡 + 至少能算出基础值」时才显示；算不出来就整块不出现（不显示 0）
             power?.let { p ->
-                CardModule("综合力") {
+                CardModule(
+                    title = "综合力",
+                    // 用户反馈只看得到「5 张卡」看不到是哪几张 —— 用这个入口去「编成」页
+                    actionLabel = "查看编成",
+                    onAction = onOpenMyDecks,
+                ) {
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text(
                             text = "%,d".format(p.total),
@@ -1257,5 +1264,6 @@ private fun serverLabel(server: String): String = when (server) {
     "en" -> "国际服"
     else -> server
 }
+
 
 

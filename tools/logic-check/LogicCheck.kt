@@ -3664,6 +3664,25 @@ fun main(args: Array<String>) {
         ),
         listOf(10, 11, 12, 13),
     )
+    // ── 全部编成（「编成」页要逐套展示）──
+    run {
+        val snapWithDecks = parseSnapshot(
+            """{"userGamedata":{"name":"x","deck":2},
+                "userDecks":[
+                  {"deckId":1,"name":"编成 1","leader":10,"subLeader":11,"member1":12,"member2":13,"member3":14},
+                  {"deckId":2,"name":"活动用","leader":20,"subLeader":21,"member1":22,"member2":23,"member3":24},
+                  {"deckId":3,"leader":30}
+                ]}""",
+            PlayerAccount("jp", "123456789012345678"),
+        )
+        checkEq("解析出全部编成（3 套）", snapWithDecks?.decks?.size, 3)
+        checkEq("按 deckId 升序", snapWithDecks?.decks?.map { it.deckId }, listOf(1, 2, 3))
+        checkEq("★ 当前编成按 userGamedata.deck 标记（这里 deck=2）", snapWithDecks?.decks?.map { it.isCurrent }, listOf(false, true, false))
+        checkEq("每套 5 张卡", snapWithDecks?.decks?.first()?.cardIds?.size, 5)
+        checkEq("没取到名字的编成用空串（界面回退成「编成 3」）", snapWithDecks?.decks?.last()?.name, "")
+        checkEq("当前编成的卡与 deckCardIds 一致", snapWithDecks?.deckCardIds, snapWithDecks?.decks?.first { it.isCurrent }?.cardIds)
+    }
+
     checkEq(
         "★ 编成最多取 5 张（leader/subLeader 与 member 重叠时不会凑出 7 张）",
         currentDeckCardIds(
@@ -3704,6 +3723,7 @@ private fun JsonObject.boolValue(key: String): Boolean? =
 private fun JsonObject.intList(key: String): List<Int> =
     (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content?.toDoubleOrNull()?.toInt() }
         ?: emptyList()
+
 
 
 
