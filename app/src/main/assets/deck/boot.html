@@ -29,7 +29,23 @@
   window.addEventListener("error", (e) => post("error", "window.error: " + e.message));
   window.addEventListener("unhandledrejection", (e) => post("error", "unhandled: " + (e.reason && e.reason.message ? e.reason.message : e.reason)));
 
+  // 从文件载入 masterdata：Kotlin 侧不走 evaluateJavascript 传大字符串
+  // （那条路会对 15 MB JSON 做逐字符转义，实测一次要分配 148 MB，直接 OOM）。
+  const loadFromUrl = async (url) => {
+    try {
+      const res = await fetch(url);
+      const text = await res.text();
+      load_masterdata(text, "[]");
+      post("loaded", "ok chars=" + text.length);
+      return "ok";
+    } catch (e) {
+      post("error", "load_from_url: " + (e && e.message ? e.message : e));
+      return "error";
+    }
+  };
+
   window.deckBoot = {
+    loadFromUrl: (url) => loadFromUrl(url),
     // 载入 masterdata：masterJson 是 {"cards":"<表原文>", …} 的字符串
     load: (masterJson) => {
       try {
@@ -69,3 +85,4 @@
 </script>
 </body>
 </html>
+

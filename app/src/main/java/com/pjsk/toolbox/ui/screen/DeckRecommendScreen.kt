@@ -118,12 +118,14 @@ fun DeckRecommendScreen(
                     busy = false
                     status = "推荐完成。"
                     detail = payload
+                    dumpToLog("RESULT", payload)
                 }
                 "elapsed" -> elapsed = "引擎耗时 $payload ms"
                 "error" -> {
                     busy = false
                     status = "❌ 引擎报错（原文见下）"
                     detail = payload
+                    dumpToLog("ERROR", payload)
                 }
             }
         }
@@ -174,9 +176,10 @@ fun DeckRecommendScreen(
                         busy = true
                         status = "正在还原 masterdata（约 10 MB JSON，第一次要几秒）…"
                         scope.launch {
-                            val md = withContext(Dispatchers.IO) { buildMasterData(container) }
-                            engine.loadMasterData(md)
-                            status = "已提交给引擎（${md.length} 字符），等待 loaded 事件…"
+                            val owned = snapshot?.cards?.map { it.cardId }?.toSet().orEmpty()
+                            val file = withContext(Dispatchers.IO) { writeMasterData(container, owned) }
+                            engine.loadMasterDataFile(file)
+                            status = "已写出 masterdata（${file.length() / 1024} KB），等待 loaded 事件…"
                         }
                     },
                 ) { Text(if (masterLoaded) "重新载入 masterdata" else "载入 masterdata") }
@@ -229,14 +232,27 @@ fun DeckRecommendScreen(
 }
 
 /** 组装引擎要的 masterdata（裁剪形状 → 原始表形状）。缺的表交给引擎自己兜底。 */
-private suspend fun buildMasterData(container: AppContainer): String {
+private suspend fun writeMasterData(container: AppContainer, ownedCardIds: Set<Int>): java.io.File {
+    return withContext(Dispatchers.IO) { buildMasterDataObject(container, ownedCardIds) }
+}
+
+/** 组装 masterdata 并**写到缓存文件**（WebView 通过 /masterdata.json 取，不经过 JS 字符串）。 */
+private suspend fun buildMasterDataObject(container: AppContainer, ownedCardIds: Set<Int>): java.io.File {
+    val dir = java.io.File(container.database.openHelper.writableDatabase.path).parentFile.let { java.io.File(it, "deck") }.apply { mkdirs() }
+    val target = java.io.File(dir, "masterdata.json")
+    val text = buildMasterData(container, ownedCardIds)
+    target.writeText(text)
+    return target
+}
+
+private suspend fun buildMasterData(container: AppContainer, ownedCardIds: Set<Int> = emptySet()): String {
     val dao = container.database.masterDao()
     suspend fun rows(table: String): List<String> = dao.observeAll(table).first().map { it.data }
     return withContext(Dispatchers.IO) {
         // 引擎按名取表：**缺一张就直接报错**（不是静默忽略）。所以这里对「我们没有的表」
         // 显式给空数组 `[]`，让"缺少表"这类错误消失，剩下的才是真正要修的数据形状问题。
         val restored = mapOf(
-            "cards" to restoreCardsJson(rows("cards.json")),
+            "cards" to restoreCardsJson(rows("cards.json"), keepIds = ownedCardIds.ifEmpty { null }),
             "areaItems" to restoreAreaItemsJson(rows("areaItems.json")),
             "areaItemLevels" to restoreAreaItemLevelsJson(rows("areaItemLevels.json")),
             "honors" to restoreHonorsJson(rows("honors.json")),
@@ -270,5 +286,22 @@ private suspend fun buildMasterData(container: AppContainer): String {
     }
 }
 
+/**
+ * 把引擎结果/报错**分片写进 logcat**。
+ *
+ * 为什么走 logcat 而不是写文件：release 版 App 的 `filesDir` 在 `/data/data/...`，
+ * adb 没有 root/run-as 读不到；写 `/sdcard/Download` 又受分区存储限制。
+ * logcat 是唯一不需要任何权限、`adb logcat -d` 就能取的通道。
+ * 每片控制在 3 KB（logcat 单条有长度上限），带 `n/N` 序号便于拼回。
+ */
+private fun dumpToLog(tag: String, text: String) {
+    val chunkSize = 3000
+    val total = (text.length + chunkSize - 1) / chunkSize
+    for (i in 0 until total) {
+        val part = text.substring(i * chunkSize, minOf(text.length, (i + 1) * chunkSize))
+        android.util.Log.i("DeckEngineDump", "$tag ${i + 1}/$total $part")
+    }
+    android.util.Log.i("DeckEngineDump", "$tag END len=${text.length}")
+}
 
 

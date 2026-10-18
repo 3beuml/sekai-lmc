@@ -42,6 +42,10 @@ class DeckEngine(private val context: Context) {
 
     private var ready: CompletableDeferred<Unit>? = null
 
+    /** masterdata 的落盘文件；WebView 通过 /masterdata.json 直接取它（不经过 JS 字符串）。 */
+    @Volatile
+    private var masterDataFile: java.io.File? = null
+
     /** 在 UI 线程调用；返回 WebView 供 Compose 的 AndroidView 挂上去。 */
     @SuppressLint("SetJavaScriptEnabled")
     fun attach(): WebView {
@@ -62,6 +66,17 @@ class DeckEngine(private val context: Context) {
                     val url = request?.url?.toString() ?: return null
                     if (!url.startsWith(BASE)) return null
                     val path = url.removePrefix(BASE).substringBefore('?')
+                    // masterdata：直接返回落盘文件，避免把 15 MB JSON 塞进 JS 字符串
+                    if (path.trimStart('/') == "masterdata.json") {
+                        val file = masterDataFile ?: return WebResourceResponse(
+                            "text/plain", "utf-8", 404, "Not Found", emptyMap(),
+                            ByteArrayInputStream(ByteArray(0)),
+                        )
+                        return WebResourceResponse(
+                            "application/json", "utf-8", 200, "OK",
+                            mapOf("Cache-Control" to "no-store"), file.inputStream(),
+                        )
+                    }
                     val assetPath = "deck/" + path.trimStart('/')
                     val stream = runCatching { context.assets.open(assetPath) }.getOrNull()
                         ?: return WebResourceResponse("text/plain", "utf-8", 404, "Not Found", emptyMap(), ByteArrayInputStream(ByteArray(0)))
@@ -93,7 +108,16 @@ class DeckEngine(private val context: Context) {
         } ?: false
     }
 
-    /** 在 UI 线程调用：把 masterdata 交给引擎（`{"cards":"…",…}`）。 */
+    /** 在 UI 线程调用：登记 masterdata 文件，让 JS 自己去取。 */
+    fun loadMasterDataFile(file: java.io.File) {
+        masterDataFile = file
+        webView?.evaluateJavascript(
+            "window.deckBoot.loadFromUrl('" + "/masterdata.json" + "')",
+            null,
+        )
+    }
+
+    /** 旧通道：直接传字符串。⚠️ 已弃用 —— 15 MB JSON 转义后要 148 MB，会 OOM。 */
     fun loadMasterData(masterdataJson: String) {
         val js = "window.deckBoot.load(${org.json.JSONObject.quote(masterdataJson)})"
         webView?.evaluateJavascript(js, null)
@@ -130,4 +154,5 @@ class DeckEngine(private val context: Context) {
         private const val READY_TIMEOUT_MS = 20_000L
     }
 }
+
 

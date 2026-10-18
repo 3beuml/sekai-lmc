@@ -46,14 +46,13 @@ private val PARAM_TYPES = listOf("param1", "param2", "param3")
  *
  * 特训加成：原始表里叫 `specialTrainingPower1/2/3BonusFixed`，我们存在 `trainBonus` 数组里。`n *`n * ⚠️ `cardParameters` 的每一项除了三个数值字段，**还必须带 `id` 和 `cardId`**：`n * 参考实现 Moesekai 的 `transformCards` 产出的是 `{id, cardId, cardLevel, cardParameterType, power}`。`n * 少了 `cardId`，参数可能挂不到正确的卡上 —— 表现为卡能被解析、但语义被打乱`n * （真机实测：`trained:false` 却 `level:60`，且搜索只访问了 17 个节点）。
  */
-fun restoreCardsJson(croppedRows: List<String>): String {
+fun restoreCardsJson(croppedRows: List<String>, keepIds: Set<Int>? = null): String {
     val sb = StringBuilder(11 * 1024 * 1024)
     sb.append('[')
     var first = true
     for (raw in croppedRows) {
         val obj = raw.parseJsonObjectOrNull() ?: continue
         val id = obj.intOrNull("id") ?: continue
-        if (!first) sb.append(',')
         first = false
         val series = listOf(
             obj["p1"] as? JsonArray,
@@ -281,7 +280,6 @@ private inline fun joinObjects(rows: List<String>, crossinline mapper: (JsonObje
     for (raw in rows) {
         val obj = raw.parseJsonObjectOrNull() ?: continue
         val mapped = mapper(obj) ?: continue
-        if (!first) sb.append(',')
         first = false
         sb.append(mapped.toString())
     }
@@ -306,6 +304,7 @@ internal fun quote(text: String): String {
     sb.append('"')
     return sb.toString()
 }
+
 
 
 
