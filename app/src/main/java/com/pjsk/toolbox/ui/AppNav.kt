@@ -38,6 +38,7 @@ import androidx.navigation.navArgument
 import com.pjsk.toolbox.PjskApp
 import com.pjsk.toolbox.data.story.StoryType
 import com.pjsk.toolbox.ui.screen.AboutScreen
+import com.pjsk.toolbox.ui.screen.Best30Screen
 import com.pjsk.toolbox.ui.screen.BindAccountScreen
 import com.pjsk.toolbox.ui.screen.CardDetailScreen
 import com.pjsk.toolbox.ui.screen.CardEpisodeScreen
@@ -99,6 +100,14 @@ object Routes {
      * 只是右侧从「▶ / ★」换成「等级 + 成绩徽章」，排序也换成按等级升序。
      */
     const val MY_MUSIC = "my/music"
+
+    /**
+     * Best30 的独立页面。
+     *
+     * 单独一屏而不是底部面板：30 条记录每条都带曲绘（认歌全靠图），
+     * 塞进浮层只能看到 7 条，且曲绘会被压得很小。
+     */
+    const val MY_BEST30 = "my/best30"
 
     const val ARG_TABLE = "table"
     const val ARG_ID = "id"
@@ -382,6 +391,7 @@ fun AppNav() {
                     onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
                     onOpenMyCards = { navController.navigate(Routes.MY_CARDS) },
                     onOpenMyMusic = { navController.navigate(Routes.MY_MUSIC) },
+                    onOpenBest30 = { navController.navigate(Routes.MY_BEST30) },
                 )
             }
 
@@ -430,6 +440,16 @@ fun AppNav() {
                     onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
                     onOpenMyPlayer = { navController.navigate(Routes.MY_PLAYER) },
                     // 点一首歌 → 歌曲详情（那里能看到完整成绩与演唱版本）
+                    onOpenDetail = { musicId -> navController.navigate(Routes.musicDetail(musicId)) },
+                )
+            }
+
+            composable(Routes.MY_BEST30) {
+                Best30Screen(
+                    region = region,
+                    onBack = { navController.popBackStack() },
+                    onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
+                    onOpenMyPlayer = { navController.navigate(Routes.MY_PLAYER) },
                     onOpenDetail = { musicId -> navController.navigate(Routes.musicDetail(musicId)) },
                 )
             }
