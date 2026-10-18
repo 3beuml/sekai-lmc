@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.data.remote
+﻿package com.pjsk.toolbox.data.remote
 
 /**
  * 区服定义。
@@ -163,6 +163,12 @@ object TableCatalog {
         // 称号：原始 3,694,822 B（8,801 行，体积全是每行最多 100 条 levels + 说明文本）。
         // `bonus` 全文只有 0 与 10 两种值，只有 34 个等级是 10 → 裁剪后约 2.4 KB。
         TableSpec("honors.json", DataModule.CHARACTER, 3_694_822L),
+        // 组卡引擎（批次 D）要的两张「规则表」：
+        // masterLessons：25 行 = 5 稀有度 × 突破 1..5，给的是每级突破的固定加成（本 App 已用 5 个常量等价实现，
+        //   但引擎要原始表，所以补齐）。原始 237,380 B → 裁剪后约 2 KB。
+        TableSpec("masterLessons.json", DataModule.CARD, 237_380L),
+        // areas：27 行区域定义，引擎用它把区域道具归到区域；本 App 至今没展示过区域名。
+        TableSpec("areas.json", DataModule.CHARACTER, 9_638L),
 
         // ── 音乐 ────────────────────────────────────────────────
         TableSpec("limitedTimeMusics.json", DataModule.MUSIC, 785L, cnOverlay = true),
@@ -262,3 +268,4 @@ object TableCatalog {
         else -> "%.1f MB".format(bytes / MB.toDouble())
     }
 }
+

@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.data.sync
+﻿package com.pjsk.toolbox.data.sync
 
 import com.pjsk.toolbox.ui.common.intOrNull
 import com.pjsk.toolbox.ui.common.longOrNull
@@ -36,6 +36,7 @@ object RowProjectors {
     const val AREA_ITEMS_FILE = "areaItems.json"
     const val AREA_ITEM_LEVELS_FILE = "areaItemLevels.json"
     const val HONORS_FILE = "honors.json"
+    const val MASTER_LESSONS_FILE = "masterLessons.json"
 
     /**
      * 该表要用哪个裁剪器。返回 `null` 表示**不裁剪**，直接存原始 JSON 文本
@@ -47,6 +48,7 @@ object RowProjectors {
         AREA_ITEMS_FILE -> AREA_ITEMS
         AREA_ITEM_LEVELS_FILE -> AREA_ITEM_LEVELS
         HONORS_FILE -> HONORS
+        MASTER_LESSONS_FILE -> MASTER_LESSONS
         else -> null
     }
 
@@ -308,6 +310,30 @@ object RowProjectors {
         }
     }
 
+    /**
+     * 突破固定加成（25 行 = 5 稀有度 × 突破 1..5）。
+     *
+     * ⚠️ 这张表**没有 `id`**，主键是 `(cardRarityType, masterRank)`。
+     * 直接拿 `masterRank` 当主键的话，5 个稀有度会互相覆盖（只剩 5 行），
+     * 而界面上完全看不出异常 —— 所以这里造一个 `id = 稀有度序号 × 10 + masterRank`。
+     *
+     * 裁剪只留算综合力要的字段；`sentence`/说明文本一律丢掉。
+     */
+    val MASTER_LESSONS = RowProjector { obj ->
+        val rarityKey = obj.stringOrNull("cardRarityType") ?: return@RowProjector null
+        val rank = obj.intOrNull("masterRank") ?: return@RowProjector null
+        if (rank <= 0) return@RowProjector null
+        val ordinal = listOf("rarity_1", "rarity_2", "rarity_3", "rarity_4", "rarity_birthday")
+            .indexOf(rarityKey)
+            .let { if (it >= 0) it + 1 else 9 }
+        buildJsonObject {
+            put("id", ordinal * 10 + rank)
+            put("cardRarityType", rarityKey)
+            put("masterRank", rank)
+            put("b", rateArray(obj, "power1BonusFixed", "power2BonusFixed", "power3BonusFixed"))
+        }
+    }
+
     /** 把三个 `powerN…Rate` 读成一个长度 3 的数组（缺省给 0）。 */
     private fun rateArray(obj: JsonObject, key1: String, key2: String, key3: String): JsonArray =
         buildJsonArray {
@@ -316,3 +342,4 @@ object RowProjectors {
             add(JsonPrimitive(obj.doubleOrNull(key3) ?: 0.0))
         }
 }
+

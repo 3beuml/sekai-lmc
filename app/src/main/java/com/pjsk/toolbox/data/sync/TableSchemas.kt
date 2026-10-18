@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.data.sync
+﻿package com.pjsk.toolbox.data.sync
 
 import kotlinx.serialization.json.JsonObject
 
@@ -101,6 +101,11 @@ object TableSchemas {
         TableSchema("areaItemLevels.json", idKeys = listOf("id", "areaItemId")),
         // 称号：裁剪后只剩带正加成的行（约 34 条），有 `id`。
         TableSchema("honors.json", nameKeys = listOf("name")),
+        // 突破固定加成（25 行）。主键是 (cardRarityType, masterRank) —— 没有 id，
+        // 裁剪器会把 masterRank 当主键兜底（同一稀有度的 5 个等级各自一行，不会撞）。
+        TableSchema("masterLessons.json", nameKeys = listOf("cardRarityType")),
+        // 区域定义（27 行）：id + name。
+        TableSchema("areas.json", nameKeys = listOf("name")),
         // ⚠️ 没有 id 字段。实测字段：characterId, characterVoice, birthday, height, school,
         // schoolYear, hobby, specialSkill, favoriteFood, hatedFood, weak, introduction, scenarioId。
         // 主键退回 characterId —— 实测 26 行 26 个唯一值，安全。
@@ -195,3 +200,5 @@ object TableSchemas {
     operator fun get(fileName: String): TableSchema =
         OVERRIDES[fileName] ?: DEFAULT.copy(fileName = fileName)
 }
+
+
