@@ -53,6 +53,7 @@ fun restoreCardsJson(croppedRows: List<String>, keepIds: Set<Int>? = null): Stri
     for (raw in croppedRows) {
         val obj = raw.parseJsonObjectOrNull() ?: continue
         val id = obj.intOrNull("id") ?: continue
+        if (!first) sb.append(',')
         first = false
         val series = listOf(
             obj["p1"] as? JsonArray,
