@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh">
 <head>
   <meta charset="utf-8">
@@ -33,7 +33,10 @@
     // 载入 masterdata：masterJson 是 {"cards":"<表原文>", …} 的字符串
     load: (masterJson) => {
       try {
-        load_masterdata(masterJson, "");
+        // 第二个参数是 music_metas 表原文。不能给空字符串 —— 引擎会直接 JSON.parse 它，
+        // 于是报「EOF while parsing a value at line 1 column 0」。给空数组表示没有曲目元数据
+        // （target=power 不需要曲目系数）。
+        load_masterdata(masterJson, "[]");
         post("loaded", "ok");
         return "ok";
       } catch (e) {
