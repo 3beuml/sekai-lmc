@@ -1,8 +1,9 @@
 package com.pjsk.toolbox.ui.player
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -45,8 +46,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -62,6 +61,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -69,7 +69,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pjsk.toolbox.PjskApp
@@ -96,10 +95,20 @@ import com.pjsk.toolbox.data.player.sleepTimerOptionOf
 import com.pjsk.toolbox.data.player.sleepTimerRemainingMs
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
+import com.pjsk.toolbox.data.palette.PlayerPaletteArgb
+import com.pjsk.toolbox.data.palette.playerPaletteFromPixels
+import com.pjsk.toolbox.ui.theme.resolveDark
+import coil.imageLoader
+import coil.request.ImageRequest
+import coil.request.SuccessResult
+import androidx.core.graphics.drawable.toBitmap
+import androidx.compose.ui.platform.LocalContext
 import com.pjsk.toolbox.ui.common.RemoteImage
 import com.pjsk.toolbox.ui.common.RowDivider
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 
 /**
  * 全屏播放器模式。
@@ -182,6 +191,103 @@ fun PlayerScreen(
     }
     if (track == null) return
 
+    // ── 封面取色（Step 3）──
+    //
+    // 规则（用户拍板）：**只在切歌时换色，切版本不换** —— 所以下面那个 map 的 key
+    // 只用 `musicId`，不含 vocalId；换版本时 key 不变，取色不会重算、界面不会闪。
+    //
+    // 缓存刻意允许 value 为 null：null 表示"这张封面算过、但不适合取色"，
+    // 与"还没算过"是两回事 —— 否则每次重组都会重算一遍失败的结果。
+    val appContext = LocalContext.current.applicationContext
+    val themeMode by container.appSettings.themeMode.collectAsState()
+    val darkTheme = themeMode.resolveDark()
+    val paletteCache = remember { LinkedHashMap<Int, PlayerPaletteArgb?>() }
+    var coverPalette by remember { mutableStateOf<PlayerPaletteArgb?>(null) }
+
+    LaunchedEffect(track.musicId, darkTheme) {
+        val id = track.musicId
+        if (paletteCache.containsKey(id)) {
+            coverPalette = paletteCache[id]
+            return@LaunchedEffect
+        }
+        // 先把上一首的颜色摘掉，避免"这首还没算完、却在用上首颜色"的错觉
+        coverPalette = null
+        val extracted = withContext(Dispatchers.IO) {
+            runCatching {
+                val url = AssetUrls.musicJacket(
+                    region,
+                    detail?.assetbundleName ?: track.jacketAssetbundleName,
+                )
+                // ⚠️ 两个参数都是必须的：
+                //  - size(72, 72)：量化只要几十见方就够，别让 Coil 解一张 1080p 原图；
+                //  - allowHardware(false)：**硬件位图读不了像素**（getPixels 会拿到全黑），
+                //    这是 Coil 的默认值 —— 这一条不写，现象是"取色永远返回黑色"。
+                val request = ImageRequest.Builder(appContext)
+                    .data(url)
+                    .size(72, 72)
+                    .allowHardware(false)
+                    .build()
+                val bitmap = (appContext.imageLoader.execute(request) as? SuccessResult)
+                    ?.drawable
+                    ?.toBitmap()
+                    ?: return@runCatching null
+                val w = bitmap.width
+                val h = bitmap.height
+                if (w <= 0 || h <= 0) return@runCatching null
+                val pixels = IntArray(w * h)
+                bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+                playerPaletteFromPixels(pixels, darkTheme)
+            }.getOrNull()
+        }
+        paletteCache[id] = extracted
+        // 只留最近 12 首：一张调色板不到 100 字节，但没必要无限涨
+        while (paletteCache.size > 12) {
+            paletteCache.remove(paletteCache.keys.first())
+        }
+        // 诊断日志：取色是"算错也不报错"的那类逻辑，出问题只能靠这行看
+        // （`adb logcat -d -s PlayerPalette:I`）。null = 这张封面不适合取色，走主题色。
+        android.util.Log.i(
+            "PlayerPalette",
+            "musicId=$id dark=$darkTheme " +
+                "seed=${extracted?.seed?.let { "#%06X".format(it and 0xFFFFFF) } ?: "none"} " +
+                "primary=${extracted?.primary?.let { "#%06X".format(it and 0xFFFFFF) } ?: "theme"} " +
+                "top=${extracted?.gradientTop?.let { "#%06X".format(it and 0xFFFFFF) } ?: "theme"}",
+        )
+        coverPalette = extracted
+    }
+
+    // 颜色切换用**渐变**而不是硬切：硬切会让整屏"啪"一下换色，很廉价。
+    // 取不到封面时（coverPalette == null）回落全局主题色，动画自然过渡。
+    val baseColors = MaterialTheme.colorScheme
+    val animSpec = tween<Color>(durationMillis = 450)
+    val animPrimary by animateColorAsState(coverPalette?.primary?.let { Color(it) } ?: baseColors.primary, animSpec)
+    val animOnPrimary by animateColorAsState(coverPalette?.onPrimary?.let { Color(it) } ?: baseColors.onPrimary, animSpec)
+    val animTop by animateColorAsState(
+        coverPalette?.gradientTop?.let { Color(it) } ?: baseColors.surfaceContainerHigh,
+        animSpec,
+    )
+    val animBottom by animateColorAsState(
+        coverPalette?.gradientBottom?.let { Color(it) } ?: baseColors.background,
+        animSpec,
+    )
+    val animOnSurface by animateColorAsState(coverPalette?.onSurface?.let { Color(it) } ?: baseColors.onSurface, animSpec)
+    val animOnSurfaceVariant by animateColorAsState(
+        coverPalette?.onSurfaceVariant?.let { Color(it) } ?: baseColors.onSurfaceVariant,
+        animSpec,
+    )
+    // 只覆盖播放器真正用到的那些角色，**不整份替换** ColorScheme：
+    // 换整份意味着 tertiary/error 之类也跟着偏色，而那些地方没人会检查对比度。
+    val playerColors = baseColors.copy(
+        primary = animPrimary,
+        onPrimary = animOnPrimary,
+        background = animBottom,
+        surface = animBottom,
+        surfaceContainerHigh = animTop,
+        surfaceContainerHighest = animTop,
+        onSurface = animOnSurface,
+        onSurfaceVariant = animOnSurfaceVariant,
+    )
+
     val vocals = detail?.vocals.orEmpty()
     val index = vocals.indexOfFirst { it.id == track.vocalId }
     val current: MusicVocal? = vocals.getOrNull(index)
@@ -259,6 +365,10 @@ fun PlayerScreen(
      * ⚠️ 因此这里**不能**再用 `verticalScroll`：滚动列里 `weight` 拿不到有界高度，
      * "把按钮钉在底部"和"整屏可滚"在同一个 Column 里是互斥的。
      */
+    // 只把**播放器这一屏**包进封面配色里（`playerColors`）：
+    // 下面的弹层（版本/队列/定时器）故意留在全局主题 —— 它们是"列表」，不是专辑封面，
+    // 跟着封面色变反而会让「这弹层属于播放器还是属于 App」变得暧昧。
+    MaterialTheme(colorScheme = playerColors) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -405,58 +515,17 @@ fun PlayerScreen(
         )
         Spacer(Modifier.height(16.dp))
 
-        // ── 进度条：Material 3 Slider ──
+        // ── 波浪进度条（用户 0.1.37 拍板：换回波浪，线加粗）──
         //
-        // 原来是自定义的 `SquigglySeekBar`（波浪线，见同目录那个文件）。用户拍板换成
-        // Google 原生的 Slider，所以这里用 M3 组件；波浪条的文件**留着**（没有删），
-        // 想换回来改这一处即可。
+        // 0.1.36 曾换成 M3 Slider，用户看过之后决定换回波浪条 —— 它是这套 UI 的招牌。
+        // 线宽从写死的 3px 改成 **2dp**（见 SquigglySeekBar 的参数注释）：
+        // 原来那个 3f 是像素，在 520dpi 上只有 0.92dp，细得几乎看不见。
         //
-        // 交互语义**和原来完全一致**（这条别改）：
-        //  - 拖动过程中只动本地状态，**不连续 seek** —— 连续 seek 会让 ExoPlayer
-        //    反复重缓冲，滑一下要卡三下；
-        //  - **松手才 seek 一次**（`onValueChangeFinished`）；
-        //  - 时长还不知道时（`known == false`）禁用，避免拖动一个无意义的 0..1。
-        var scrubbing by remember { mutableStateOf(false) }
-        var scrubFraction by remember { mutableStateOf(0f) }
-        val shownFraction = if (scrubbing) {
-            scrubFraction
-        } else {
-            fractionOf(state.displayPositionMs, duration)
-        }
-        // M3 1.3 的 Slider **默认 knob 是竖条**（4dp 宽 × 44dp 高，Material 3 Expressive 的样式）。
-        // 用户要的是「细轨道 + 圆角 knob」，也就是经典 M3 的样子，所以把 thumb 换成
-        // `SliderDefaults.Thumb(thumbSize = 20dp × 20dp)` —— 它的形状是按尺寸画的胶囊，
-        // 长宽相等时正好是个圆（尺寸由 SliderState 自己摆放，不用我们算偏移）。
-        val sliderColors = SliderDefaults.colors(
-            thumbColor = MaterialTheme.colorScheme.primary,
-            activeTrackColor = MaterialTheme.colorScheme.primary,
-            inactiveTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-            disabledThumbColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-            disabledActiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-            disabledInactiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
-        )
-        val sliderInteraction = remember { MutableInteractionSource() }
-        Slider(
-            value = shownFraction.coerceIn(0f, 1f),
-            onValueChange = { value ->
-                scrubbing = true
-                scrubFraction = value
-            },
-            onValueChangeFinished = {
-                scrubbing = false
-                player.seekToDisplay(positionOfFraction(scrubFraction, duration))
-            },
+        // 交互语义维持原样：拖动只更新本地预览，**松手才 seek 一次**。
+        SquigglySeekBar(
+            fraction = fractionOf(state.displayPositionMs, duration),
             enabled = known,
-            colors = sliderColors,
-            interactionSource = sliderInteraction,
-            thumb = {
-                SliderDefaults.Thumb(
-                    interactionSource = sliderInteraction,
-                    colors = sliderColors,
-                    enabled = known,
-                    thumbSize = DpSize(20.dp, 20.dp),
-                )
-            },
+            onSeek = { fraction -> player.seekToDisplay(positionOfFraction(fraction, duration)) },
             modifier = Modifier.fillMaxWidth(),
         )
         Row(
@@ -568,6 +637,7 @@ fun PlayerScreen(
                 showQueue = true
             }
         }
+    }
     }
 
     // ── 定时器弹层 ──
@@ -869,3 +939,4 @@ private fun PlayerAction(
         }
     }
 }
+

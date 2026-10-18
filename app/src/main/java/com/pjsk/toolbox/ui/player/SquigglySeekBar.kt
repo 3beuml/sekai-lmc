@@ -46,6 +46,11 @@ import kotlin.math.sin
  *
  * @param fraction 当前进度（0~1），由调用方从播放状态算好
  * @param onSeek [fraction] 松手/点击时回调（0~1）
+ * @param trackWidth 线宽。**0.1.37 起从写死的 3px 改成 2dp** —— 原来那个 3f 是**像素**，
+ *   在 520dpi 的机器上只有 0.92dp，细到几乎看不见；用户反馈"把线稍微增粗一点"，
+ *   这里顺手改成 dp（与密度无关，换机型不会又变回一条发丝线）。
+ * @param thumbRadius 静止时的手柄半径（dp）。原来写死 6f **像素** ≈ 1.8dp，基本是个点。
+ * @param thumbRadiusDragging 拖动时的手柄半径（dp，放大给手指反馈）。
  */
 @Composable
 fun SquigglySeekBar(
@@ -55,6 +60,9 @@ fun SquigglySeekBar(
     modifier: Modifier = Modifier,
     waveLength: Dp = 27.dp,
     amplitude: Dp = 2.7.dp,
+    trackWidth: Dp = 2.dp,
+    thumbRadius: Dp = 3.5.dp,
+    thumbRadiusDragging: Dp = 5.dp,
 ) {
     // null = 没在拖；否则是拖动中的预览分数
     var dragFraction by remember { mutableStateOf<Float?>(null) }
@@ -66,6 +74,9 @@ fun SquigglySeekBar(
     val density = LocalDensity.current
     val waveLengthPx = with(density) { waveLength.toPx() }
     val amplitudePx = with(density) { amplitude.toPx() }
+    val trackWidthPx = with(density) { trackWidth.toPx() }
+    val thumbPx = with(density) { thumbRadius.toPx() }
+    val thumbDraggingPx = with(density) { thumbRadiusDragging.toPx() }
 
     Canvas(
         modifier = modifier
@@ -101,7 +112,7 @@ fun SquigglySeekBar(
             color = trackColor,
             start = Offset(progressWidth, centerY),
             end = Offset(size.width, centerY),
-            strokeWidth = 3f,
+            strokeWidth = trackWidthPx,
         )
 
         // 已播部分：正弦波
@@ -117,13 +128,13 @@ fun SquigglySeekBar(
             }
             // 收尾对齐到准确位置，免得波尾因为步进取整短一截
             path.lineTo(progressWidth, centerY)
-            drawPath(path = path, color = progressColor, style = Stroke(width = 3f))
+            drawPath(path = path, color = progressColor, style = Stroke(width = trackWidthPx))
         }
 
         // 拖动把手
         drawCircle(
             color = thumbColor,
-            radius = if (dragFraction != null) 9f else 6f,
+            radius = if (dragFraction != null) thumbDraggingPx else thumbPx,
             center = Offset(progressWidth, centerY),
         )
     }

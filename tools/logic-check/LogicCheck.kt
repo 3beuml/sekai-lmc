@@ -1,4 +1,4 @@
-import com.pjsk.toolbox.data.card.CardArtPlan
+﻿import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
 import com.pjsk.toolbox.data.card.CardQuery
 import com.pjsk.toolbox.data.card.CardSort
@@ -199,6 +199,14 @@ import com.pjsk.toolbox.data.profile.rarityDistribution
 import com.pjsk.toolbox.data.profile.rarityLabel
 import com.pjsk.toolbox.data.profile.sortBonds
 import com.pjsk.toolbox.data.profile.sortCharacters
+import com.pjsk.toolbox.data.palette.contrastRatio
+import com.pjsk.toolbox.data.palette.ensureContrast
+import com.pjsk.toolbox.data.palette.hslToArgb
+import com.pjsk.toolbox.data.palette.pickArtworkSeed
+import com.pjsk.toolbox.data.palette.playerPaletteFromPixels
+import com.pjsk.toolbox.data.palette.relativeLuminance
+import com.pjsk.toolbox.data.palette.rgbToHsl
+import com.pjsk.toolbox.data.palette.whiteOrBlack
 import com.pjsk.toolbox.data.remote.TableCatalog
 import com.pjsk.toolbox.data.story.StoryAssetKind
 import com.pjsk.toolbox.data.sync.DatapackImportOrder
@@ -4151,6 +4159,11 @@ fun main(args: Array<String>) {
     )
     check("musicMetas 有裁剪器（否则 5.4 MB 的原始表会整张进 APK）", RowProjectors.forFile("musicMetas.json") != null)
 
+    // ⚠️ 第 31 节抽成了独立函数：main() 已经撞到 JVM 的 64KB 方法上限
+    //    （MethodTooLargeException），再往里塞就会被 kotlinc 拒绝。新节也请照这个来。
+    checkArtworkPalette()
+
+
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))
     if (failures == 0) {
@@ -4191,4 +4204,123 @@ private fun JsonObject.intList(key: String): List<Int> =
 
 
 
+
+
+
+
+/**
+ * 第 31 节：封面取色（播放器 Material You）。
+ *
+ * 抽成独立函数不是为了好看 —— `main()` 已经四千多行，再加断言会触发
+ * JVM 的 `MethodTooLargeException: Method too large`（64KB 方法上限）。
+ * **以后新增的节都请写成这样的独立函数**，在 main 末尾调一行。
+ */
+private fun checkArtworkPalette() {
+// ─────────────────────────────────────────────────────────
+section("31. 封面取色：种子筛选 / 色调派生 / 对比度兜底（播放器 Material You）")
+// 这一层的错法特别"静默"：算出来的颜色不报错，只是界面变灰、或者白字压在白底上。
+// 所以每条规则都断言。
+
+// ── 颜色工具：往返一致 ──
+checkEq(
+    "★ hslToArgb ↔ rgbToHsl 往返一致（#39C5BB）",
+    run {
+        val hsl = rgbToHsl(0x39.toFloat(), 0xC5.toFloat(), 0xBB.toFloat())
+        hslToArgb(hsl[0], hsl[1], hsl[2])
+    },
+    0xFF39C5BB.toInt(),
+)
+checkEq("白色的饱和度是 0", rgbToHsl(255f, 255f, 255f)[1], 0f)
+checkEq("黑色的亮度是 0", rgbToHsl(0f, 0f, 0f)[2], 0f)
+// 初音绿的色相应该在青绿区（约 175°）——色相算错整屏颜色都会偏到别的色系
+check(
+    "★ 初音绿的色相在青绿区（172°~180°）",
+    rgbToHsl(0x39.toFloat(), 0xC5.toFloat(), 0xBB.toFloat())[0] in 172f..180f,
+    "实际=${rgbToHsl(0x39.toFloat(), 0xC5.toFloat(), 0xBB.toFloat())[0]}",
+)
+
+// ── 对比度工具 ──
+check("白底黑字对比度约 21:1", contrastRatio(0xFF000000.toInt(), 0xFFFFFFFF.toInt()) > 20.9)
+check("同色对比度 = 1", kotlin.math.abs(contrastRatio(0xFF39C5BB.toInt(), 0xFF39C5BB.toInt()) - 1.0) < 0.001)
+checkEq("白底上应选黑字", whiteOrBlack(0xFFFFFFFF.toInt()), 0xFF000000.toInt())
+checkEq("黑底上应选白字", whiteOrBlack(0xFF000000.toInt()), 0xFFFFFFFF.toInt())
+// ensureContrast：极端色相（黄）压白底，必须推到能读
+check(
+    "★ ensureContrast 把不可读的黄字压到 4.5:1 以上",
+    contrastRatio(ensureContrast(0xFFFFFF00.toInt(), 0xFFFFFFFF.toInt(), 4.5), 0xFFFFFFFF.toInt()) >= 4.5,
+)
+check(
+    "已经达标的不动它",
+    ensureContrast(0xFF000000.toInt(), 0xFFFFFFFF.toInt(), 4.5) == 0xFF000000.toInt(),
+)
+
+// ── 种子筛选：这三条是"界面变灰"的三条防线 ──
+val whitePixels = IntArray(256) { 0xFFFFFFFF.toInt() }
+val blackPixels = IntArray(256) { 0xFF000000.toInt() }
+val grayPixels = IntArray(256) { i -> 0xFF000000.toInt() or (i shl 16) or (i shl 8) or i }
+check("★ 纯白封面 → 不取色（返回 null，退回主题色）", pickArtworkSeed(whitePixels) == null)
+check("★ 纯黑封面 → 不取色", pickArtworkSeed(blackPixels) == null)
+check("★ 灰度封面 → 不取色（低饱和必须被丢掉，否则整屏发灰）", pickArtworkSeed(grayPixels) == null)
+check("空像素数组 → 不取色", pickArtworkSeed(IntArray(0)) == null)
+
+// 95% 白底 + 5% 青色块：必须挑到青色，不能挑白色
+val mostlyWhiteWithTeal = IntArray(1000) { i ->
+    if (i < 50) 0xFF39C5BB.toInt() else 0xFFFFFFFF.toInt()
+}
+val tealSeed = pickArtworkSeed(mostlyWhiteWithTeal)
+check("★ 白底里的小块青色会被挑中（不是挑白）", tealSeed != null)
+check(
+    "★ 挑中后的色相仍在青绿区",
+    tealSeed != null && tealSeed.hue in 160f..200f,
+    "实际 hue=${tealSeed?.hue} share=${tealSeed?.share}",
+)
+
+// 半透明像素不参与（否则平均出来是脏色）
+check(
+    "半透明像素被跳过（全透明的青色图不取色）",
+    pickArtworkSeed(IntArray(64) { 0x0039C5BB }) == null,
+)
+
+// ── 派生出的调色板：对比度必须达标（否则白字压白底）──
+val lightPalette = playerPaletteFromPixels(mostlyWhiteWithTeal, dark = false)
+val darkPalette = playerPaletteFromPixels(mostlyWhiteWithTeal, dark = true)
+check("浅色主题能派生出调色板", lightPalette != null)
+check("深色主题能派生出调色板", darkPalette != null)
+check(
+    "★ 浅色：主色上的图标对比度 ≥ 4.5（播放键里的三角看得清）",
+    contrastRatio(lightPalette!!.onPrimary, lightPalette.primary) >= 4.5,
+    "实际=${contrastRatio(lightPalette.onPrimary, lightPalette.primary)}",
+)
+check(
+    "★ 浅色：正文压在渐变两端都 ≥ 4.5",
+    contrastRatio(lightPalette.onSurface, lightPalette.gradientTop) >= 4.5 &&
+        contrastRatio(lightPalette.onSurface, lightPalette.gradientBottom) >= 4.5,
+)
+check(
+    "★ 深色：正文压在渐变两端都 ≥ 4.5",
+    contrastRatio(darkPalette!!.onSurface, darkPalette.gradientTop) >= 4.5 &&
+        contrastRatio(darkPalette.onSurface, darkPalette.gradientBottom) >= 4.5,
+)
+check(
+    "★ 浅色：渐变上端比下端暗（光从上面来，封面才像浮着）",
+    relativeLuminance(lightPalette.gradientTop) < relativeLuminance(lightPalette.gradientBottom),
+)
+check(
+    "★ 深色：渐变上端比下端亮",
+    relativeLuminance(darkPalette.gradientTop) > relativeLuminance(darkPalette.gradientBottom),
+)
+check(
+    "★ 两种主题的主色亮度方向相反（浅色压暗、深色提亮）",
+    relativeLuminance(lightPalette.primary) < relativeLuminance(darkPalette.primary),
+)
+check(
+    "同名输入两次结果一致（纯函数，可缓存）",
+    playerPaletteFromPixels(mostlyWhiteWithTeal, false) == lightPalette,
+)
+check(
+    "不适合取色的封面 → 调色板为 null（界面退回主题色）",
+    playerPaletteFromPixels(whitePixels, false) == null &&
+        playerPaletteFromPixels(grayPixels, true) == null,
+)
+}
 
