@@ -92,6 +92,8 @@ import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.settings.NameLanguage
 import com.pjsk.toolbox.data.settings.VocalMode
 import com.pjsk.toolbox.ui.common.EmptyState
+import com.pjsk.toolbox.ui.common.FilterGroupTitle
+import com.pjsk.toolbox.ui.common.FilterSheet
 import com.pjsk.toolbox.ui.common.RemoteImage
 import com.pjsk.toolbox.ui.common.RowDivider
 import com.pjsk.toolbox.ui.common.SongListColumn
@@ -591,28 +593,16 @@ private fun SongFilterSheet(
     onChange: (SongQuery) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    FilterSheet(
+        onDismiss = onDismiss,
+        onReset = { onChange(query.cleared()) },
+        footerLabel = if (query.isFiltering) {
+            "显示 $matchedCount / ${musics.size} 首"
+        } else {
+            "显示全部 ${musics.size} 首"
+        },
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 560.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("筛选", style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = { onChange(query.cleared()) }) { Text("重置") }
-            }
-
-            FilterGroupTitle("组合（游戏内选曲界面的分类）")
+        FilterGroupTitle("组合（游戏内选曲界面的分类）")
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -679,27 +669,5 @@ private fun SongFilterSheet(
                     )
                 }
             }
-
-            Spacer(Modifier.height(14.dp))
-            Button(
-                onClick = onDismiss,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    if (query.isFiltering) "显示 $matchedCount / ${musics.size} 首"
-                    else "显示全部 ${musics.size} 首",
-                )
-            }
-        }
     }
-}
-
-@Composable
-private fun FilterGroupTitle(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelLarge,
-        color = MaterialTheme.colorScheme.onSurface,
-        modifier = Modifier.padding(top = 14.dp, bottom = 6.dp),
-    )
 }

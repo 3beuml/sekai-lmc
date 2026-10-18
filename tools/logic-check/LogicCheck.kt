@@ -141,6 +141,14 @@ import com.pjsk.toolbox.data.profile.parseBondRows
 import com.pjsk.toolbox.data.profile.parseCharacterColors
 import com.pjsk.toolbox.data.profile.parseOwnedCardIds
 import com.pjsk.toolbox.data.profile.DifficultySummary
+import com.pjsk.toolbox.data.profile.MyMusicQuery
+import com.pjsk.toolbox.data.profile.MyMusicSort
+import com.pjsk.toolbox.data.profile.STATUS_CHOICES
+import com.pjsk.toolbox.data.profile.difficultyCounts
+import com.pjsk.toolbox.data.profile.filterMySongs
+import com.pjsk.toolbox.data.profile.myMusicQueryFromSaveText
+import com.pjsk.toolbox.data.profile.statusCounts
+import com.pjsk.toolbox.data.profile.toSaveText
 import com.pjsk.toolbox.data.profile.MusicResult
 import com.pjsk.toolbox.data.profile.SongPlayFilter
 import com.pjsk.toolbox.data.profile.SongPlayStatus
@@ -3103,6 +3111,174 @@ fun main(args: Array<String>) {
         listOf(difficultyOrder("easy"), difficultyOrder("append")),
         listOf(0, 5),
     )
+
+    // ─────────────────────────────────────────────────────────
+    section("25. 我的歌曲的筛选面板：条件组合 / 各组计数口径 / 编码往返")
+    // ─────────────────────────────────────────────────────────
+    // 这一节防两件事：
+    //  1. **计数被自己那一档污染** —— 选中 FC 之后如果连状态 chip 的数字都按状态过滤，
+    //     另外三个会一起变成 0，看起来像功能坏了；
+    //  2. **难度/组合/分类没接上** —— 面板挪到浮层里之后，漏传某一维是很容易发生的，
+    //     而现象只是"筛选不生效"，不会报错。
+    val panelSongs = listOf(
+        wsong(1).copy(unitTags = listOf("light_music_club"), categories = listOf("mv_2d"), publishedAt = 1000L),
+        wsong(2).copy(unitTags = listOf("light_music_club"), categories = listOf("image"), publishedAt = 3000L),
+        wsong(3).copy(unitTags = listOf("street"), categories = listOf("mv_2d"), publishedAt = 2000L),
+        wsong(4).copy(unitTags = listOf("street"), categories = listOf("mv_2d"), publishedAt = 4000L),
+    )
+    // 1 = AP（master 32）、2 = 只有 FC、3 打过没 FC、4 从没打过
+    val panelResults = listOf(
+        MusicResult(1, "master", fullCombo = true, allPerfect = true, highScore = 1),
+        MusicResult(2, "master", fullCombo = true, allPerfect = false, highScore = 1),
+        MusicResult(3, "master", fullCombo = false, allPerfect = false, highScore = 1),
+    )
+    val panelLevels = panelSongs.associate { it.id to mapOf("master" to (30 + it.id)) }
+    val panelIndex = playStatusIndex(panelResults, "master")
+
+    fun panelQuery(block: MyMusicQuery.() -> MyMusicQuery = { this }) =
+        MyMusicQuery(difficulty = "master").block()
+
+    checkEq(
+        "默认条件 = 该难度全部",
+        filterMySongs(panelSongs, panelResults, panelLevels, panelQuery()).map { it.id },
+        listOf(4, 2, 3, 1), // 默认按最新上线倒序（publishedAt 4000 → 3000 → 2000 → 1000）
+    )
+    checkEq(
+        "状态：FC 的（含 AP）",
+        filterMySongs(panelSongs, panelResults, panelLevels, panelQuery { copy(status = SongPlayFilter.FC) })
+            .map { it.id }.sorted(),
+        listOf(1, 2),
+    )
+    checkEq(
+        "组合是「同维多选取或」",
+        filterMySongs(
+            panelSongs,
+            panelResults,
+            panelLevels,
+            panelQuery { copy(units = setOf("light_music_club", "street")) },
+        ).size,
+        4,
+    )
+    checkEq(
+        "组合 + 分类是「跨维取且」",
+        filterMySongs(
+            panelSongs,
+            panelResults,
+            panelLevels,
+            panelQuery { copy(units = setOf("street"), categories = setOf("mv_2d")) },
+        ).map { it.id }.sorted(),
+        listOf(3, 4),
+    )
+    checkEq(
+        "搜索：按曲名",
+        filterMySongs(panelSongs, panelResults, panelLevels, panelQuery { copy(search = "Song2") })
+            .map { it.id },
+        listOf(2),
+    )
+    checkEq(
+        "★ 排除开关「隐藏已 FC 的」= 只剩没 FC 的（含从没打过）",
+        filterMySongs(panelSongs, panelResults, panelLevels, panelQuery { copy(hideFc = true) })
+            .map { it.id }.sorted(),
+        listOf(3, 4),
+    )
+    checkEq(
+        "★ 排除开关「隐藏已 AP 的」",
+        filterMySongs(panelSongs, panelResults, panelLevels, panelQuery { copy(hideAp = true) })
+            .map { it.id }.sorted(),
+        listOf(2, 3, 4),
+    )
+    checkEq(
+        "状态 + 排除叠加会取交集（FC 的里再隐藏已 FC 的 → 空）",
+        filterMySongs(
+            panelSongs,
+            panelResults,
+            panelLevels,
+            panelQuery { copy(status = SongPlayFilter.FC, hideFc = true) },
+        ).size,
+        0,
+    )
+    checkEq(
+        "排序：最早上线",
+        filterMySongs(
+            panelSongs,
+            panelResults,
+            panelLevels,
+            panelQuery { copy(sort = MyMusicSort.OLDEST) },
+        ).map { it.id },
+        listOf(1, 3, 2, 4),
+    )
+    checkEq(
+        "排序：等级从低到高",
+        filterMySongs(
+            panelSongs,
+            panelResults,
+            panelLevels,
+            panelQuery { copy(sort = MyMusicSort.LEVEL_ASC) },
+        ).map { it.id },
+        listOf(1, 2, 3, 4),
+    )
+
+    // ── 各组计数的口径 ──
+    val scopedForStatus = filterSongs(
+        panelSongs,
+        SongQuery(units = setOf("street"), categories = emptySet()),
+    )
+    val scopedOfDifficulty = songsWithDifficulty(scopedForStatus, panelLevels, "master")
+    val statusCountMap = statusCounts(scopedOfDifficulty, panelIndex)
+    checkEq(
+        "状态 chip 的数字：组合=street 下 全部 2 / 已打 1 / FC 0 / AP 0",
+        STATUS_CHOICES.map { statusCountMap[it] },
+        listOf(2, 1, 0, 0),
+    )
+    checkEq(
+        "★ 状态 chip 的数字不随状态自身变化（否则选中 FC 后别的会变 0）",
+        statusCounts(scopedOfDifficulty, panelIndex) == statusCounts(scopedOfDifficulty, panelIndex),
+        true,
+    )
+    checkEq(
+        "难度 chip 的数字 = 该难度 + 当前状态下的数量",
+        difficultyCounts(
+            panelSongs,
+            panelResults,
+            panelLevels,
+            listOf("master"),
+            SongPlayFilter.AP,
+        ),
+        mapOf("master" to 1),
+    )
+
+    // ── 编码往返（rememberSaveable 靠它，从详情页返回时筛选不能丢） ──
+    val richQuery = MyMusicQuery(
+        status = SongPlayFilter.FC,
+        difficulty = "expert",
+        units = setOf("street", "light_music_club"),
+        categories = setOf("mv_2d"),
+        sort = MyMusicSort.LEVEL_ASC,
+        hideFc = true,
+        hideAp = false,
+        search = "ロキ",
+    )
+    checkEq("条件往返一致", myMusicQueryFromSaveText(richQuery.toSaveText()), richQuery)
+    checkEq(
+        "搜索词里混进分隔符也不串位（搜索放最后一个字段）",
+        myMusicQueryFromSaveText(richQuery.copy(search = "a\u0001b,c").toSaveText()).search,
+        "a\u0001b,c",
+    )
+    checkEq(
+        "字段数对不上（旧数据）→ 退回默认值，不抛异常",
+        myMusicQueryFromSaveText("FC\u0001master"),
+        MyMusicQuery(),
+    )
+    checkEq(
+        "★ 难度不算进 activeCount（它总有一个值，算进去角标永远是 1）",
+        listOf(
+            MyMusicQuery(difficulty = "master").activeCount,
+            MyMusicQuery(difficulty = "master", status = SongPlayFilter.FC).activeCount,
+            MyMusicQuery(difficulty = "master", hideAp = true).activeCount,
+        ),
+        listOf(0, 1, 1),
+    )
+    checkEq("面板只给四个状态（未 FC / 未 AP 改成开关了）", STATUS_CHOICES.map { it.label }, listOf("全部", "已打过", "FC 的", "AP 的"))
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))
