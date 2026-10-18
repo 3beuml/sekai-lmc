@@ -204,7 +204,9 @@ import com.pjsk.toolbox.data.palette.ensureContrast
 import com.pjsk.toolbox.data.palette.hslToArgb
 import com.pjsk.toolbox.data.palette.pickArtworkSeed
 import com.pjsk.toolbox.data.palette.pickArtworkSeedLoose
-import com.pjsk.toolbox.data.palette.darkPlayerPaletteFromPixels
+import com.pjsk.toolbox.data.palette.LIGHT_COVER_THRESHOLD
+import com.pjsk.toolbox.data.palette.averageLightness
+import com.pjsk.toolbox.data.palette.playerPaletteFromPixels
 import com.pjsk.toolbox.data.palette.relativeLuminance
 import com.pjsk.toolbox.data.palette.rgbToHsl
 import com.pjsk.toolbox.data.palette.whiteOrBlack
@@ -3962,9 +3964,22 @@ check("★ 纯黑封面 → 不取色", pickArtworkSeed(blackPixels) == null)
 check("★ 灰度封面 → 不取色（低饱和必须被丢掉，否则整屏发灰）", pickArtworkSeed(grayPixels) == null)
 check("空像素数组 → 不取色", pickArtworkSeed(IntArray(0)) == null)
 
-// 95% 白底 + 5% 青色块：必须挑到青色，不能挑白色
+// 半透明像素不参与（否则平均出来是脏色）
+check(
+    "半透明像素被跳过（全透明的青色图不取色）",
+    pickArtworkSeed(IntArray(64) { 0x0039C5BB }) == null,
+)
+
+// ── 明暗自适应（0.1.43）：亮封面走浅色方案，暗封面走深色 ──
+//
+// 95% 白底 + 5% 青色 = "亮封面"；95% 近黑底 + 5% 青色 = "暗封面"。
+// 两张图的**种子是同一个青色**，唯一区别是整体亮度 —— 正好用来验"明暗看的是平均亮度，
+// 不是种子亮度"（否则暗底亮高光的夜场卡会被误判成浅色）。
 val mostlyWhiteWithTeal = IntArray(1000) { i ->
     if (i < 50) 0xFF39C5BB.toInt() else 0xFFFFFFFF.toInt()
+}
+val mostlyDarkWithTeal = IntArray(1000) { i ->
+    if (i < 50) 0xFF39C5BB.toInt() else 0xFF101010.toInt()
 }
 val tealSeed = pickArtworkSeed(mostlyWhiteWithTeal)
 check("★ 白底里的小块青色会被挑中（不是挑白）", tealSeed != null)
@@ -3973,6 +3988,12 @@ check(
     tealSeed != null && tealSeed.hue in 160f..200f,
     "实际 hue=${tealSeed?.hue} share=${tealSeed?.share}",
 )
+check(
+    "★ 亮封面的平均亮度高、暗封面的低（同一支种子色）",
+    averageLightness(mostlyWhiteWithTeal) >= LIGHT_COVER_THRESHOLD &&
+        averageLightness(mostlyDarkWithTeal) < LIGHT_COVER_THRESHOLD,
+    "亮=${averageLightness(mostlyWhiteWithTeal)} 暗=${averageLightness(mostlyDarkWithTeal)}",
+)
 
 // 半透明像素不参与（否则平均出来是脏色）
 check(
@@ -3980,14 +4001,15 @@ check(
     pickArtworkSeed(IntArray(64) { 0x0039C5BB }) == null,
 )
 
-// ── 深色沉浸式调色板：对比度必须达标（深底 + 亮字，且不能残留原主题色）──
-val darkPalette = darkPlayerPaletteFromPixels(mostlyWhiteWithTeal)
-check("能派生出深色调色板", darkPalette != null)
+// ── 深色方案：对比度必须达标（深底 + 亮字）──
+val darkPalette = playerPaletteFromPixels(mostlyDarkWithTeal)
+check("暗封面能派生出深色调色板", darkPalette != null)
 val dp = darkPalette!!
+check("★ 暗封面 → isLight = false", !dp.isLight)
 check(
-    "★ 强调色上的图标对比度 ≥ 4.5（播放键里的三角看得清）",
-    contrastRatio(dp.onAccent, dp.accent) >= 4.5,
-    "实际=${contrastRatio(dp.onAccent, dp.accent)}",
+    "★ 播放键图标压在深色圆上 ≥ 4.5（圆里的三角/两竖看得清）",
+    contrastRatio(dp.onControlFill, dp.controlFill) >= 4.5,
+    "实际=${contrastRatio(dp.onControlFill, dp.controlFill)}",
 )
 check(
     "★ 正文压在渐变两端都 ≥ 4.5（深底白字）",
@@ -3999,11 +4021,11 @@ check(
     contrastRatio(dp.onSurfaceVariant, dp.surfaceContainer) >= 4.0,
 )
 check(
-    "★ 强调色在最深背景上仍然可读（进度条就在渐变底部）",
+    "★ 强调色在最深背景上仍然可读（进度条、曲名就在这层上）",
     contrastRatio(dp.accent, dp.gradientBottom) >= 4.5,
 )
 check(
-    "★ 渐变上端比下端亮（光从上面来，卡片才像浮着）",
+    "★ 渐变上端比下端亮（光从上面来，封面才像浮着）",
     relativeLuminance(dp.gradientTop) > relativeLuminance(dp.gradientBottom),
 )
 check(
@@ -4021,21 +4043,90 @@ check(
     relativeLuminance(dp.accent) > relativeLuminance(dp.surfaceHighest) * 4,
 )
 check(
-    "★ 未播轨道（去饱和版）比正文暗、比背景亮",
-    relativeLuminance(dp.fadedTrack) < relativeLuminance(dp.onSurface) &&
-        relativeLuminance(dp.fadedTrack) > relativeLuminance(dp.gradientBottom),
+    "★ 深色方案的播放键是「深圆 + 亮图标」",
+    relativeLuminance(dp.controlFill) < relativeLuminance(dp.onControlFill),
 )
 check(
     "同名输入两次结果一致（纯函数，可缓存）",
-    darkPlayerPaletteFromPixels(mostlyWhiteWithTeal) == darkPalette,
-)
-check(
-    "不适合取色的封面 → 调色板为 null（界面回退默认深色）",
-    darkPlayerPaletteFromPixels(whitePixels) == null &&
-        darkPlayerPaletteFromPixels(grayPixels) == null,
+    playerPaletteFromPixels(mostlyDarkWithTeal) == darkPalette,
 )
 
-// ── 宽松档兜底（0.1.41 实机数据：连续跳 10 首有 8 首严格档返回 null）──
+// "这张颜色到底看不看得出来"的判据：RGB 色度 (max-min)/255。
+// HSL 的 s 在接近白的地方会把"看不出颜色"算成"有饱和"，别用它判可见性。
+fun chromaOf(argb: Int): Float {
+    val r = (argb shr 16) and 0xFF
+    val g = (argb shr 8) and 0xFF
+    val b = argb and 0xFF
+    return (maxOf(r, maxOf(g, b)) - minOf(r, minOf(g, b))) / 255f
+}
+
+// ── 浅色方案（0.1.43 用户拍板：亮封面走浅底 + 深色控制键）──
+val lightPalette = playerPaletteFromPixels(mostlyWhiteWithTeal)
+check("亮封面能派生出浅色调色板", lightPalette != null)
+val lp = lightPalette!!
+check("★ 亮封面 → isLight = true", lp.isLight)
+check(
+    "★ 浅色方案的底色是**浅**（渐变两端都亮：>0.75 / >0.60）",
+    relativeLuminance(lp.gradientTop) > 0.75 && relativeLuminance(lp.gradientBottom) > 0.60,
+    "top=${relativeLuminance(lp.gradientTop)} bottom=${relativeLuminance(lp.gradientBottom)}",
+)
+check(
+    "★ 浅底上正文是深色字，两端都 ≥ 4.5",
+    contrastRatio(lp.onSurface, lp.gradientTop) >= 4.5 &&
+        contrastRatio(lp.onSurface, lp.gradientBottom) >= 4.5,
+)
+check(
+    "★ 浅底上次要正文（歌手/时间）≥ 4.0",
+    contrastRatio(lp.onSurfaceVariant, lp.surfaceContainer) >= 4.0,
+    "实际=${contrastRatio(lp.onSurfaceVariant, lp.surfaceContainer)}",
+)
+check(
+    "★ 强调色（进度条已播段 + 曲名）压在浅底上 ≥ 4.5",
+    contrastRatio(lp.accent, lp.gradientBottom) >= 4.5 &&
+        contrastRatio(lp.accent, lp.gradientTop) >= 4.5,
+)
+check(
+    "★ 强调色在浅色方案里是**深**的（<0.25 相对亮度）—— 这就是「较深的封面配色」",
+    relativeLuminance(lp.accent) < 0.25,
+    "实际=${relativeLuminance(lp.accent)}",
+)
+check(
+    "★ 播放键：实心圆比底色深得多（≥4.5），图标在圆里也 ≥4.5",
+    contrastRatio(lp.controlFill, lp.gradientTop) >= 4.5 &&
+        contrastRatio(lp.onControlFill, lp.controlFill) >= 4.5,
+    "圆vs底=${contrastRatio(lp.controlFill, lp.gradientTop)} 图标vs圆=${contrastRatio(lp.onControlFill, lp.controlFill)}",
+)
+check(
+    "★ 浅色方案里播放键比正文更「实」（饱和色，不是灰）",
+    rgbToHsl(
+        ((lp.controlFill shr 16) and 0xFF).toFloat(),
+        ((lp.controlFill shr 8) and 0xFF).toFloat(),
+        (lp.controlFill and 0xFF).toFloat(),
+    )[1] >= 0.40f,
+)
+check(
+    "★ 浅色的表面阶是**递减**（Low 最亮 → Highest 最暗，M3 里越高层越深）",
+    relativeLuminance(lp.surfaceLow) > relativeLuminance(lp.surfaceContainer) &&
+        relativeLuminance(lp.surfaceContainer) > relativeLuminance(lp.surfaceHigh) &&
+        relativeLuminance(lp.surfaceHigh) > relativeLuminance(lp.surfaceHighest),
+)
+check(
+    "★ 底色**看得出封面色相**（RGB 色度 ≥0.04，否则等于纯白，「背景跟着封面变」就成了空话）",
+    chromaOf(lp.surfaceContainer) >= 0.04f,
+    "实际 chroma=${chromaOf(lp.surfaceContainer)}",
+)
+check(
+    "★ 但也不能染过头（RGB 色度 ≤0.20，浅底染狠了就脏）",
+    chromaOf(lp.surfaceContainer) <= 0.20f,
+    "实际 chroma=${chromaOf(lp.surfaceContainer)}",
+)
+check(
+    "纯白/纯灰封面仍然不取色（返回 null，界面回退 App 当前主题）",
+    playerPaletteFromPixels(whitePixels) == null &&
+        playerPaletteFromPixels(grayPixels) == null,
+)
+
+// ── 宽松档兜底（0.1.42 实机数据：连续跳 10 首有 8 首严格档返回 null）──
 // 卡面是整幅插画，量化后单色块很难占到 2%，严格档于是集体空手 → 播放器掉回默认紫。
 // 这里造一张"颜色很分散"的图：60 个色块 × 16 px，单块只占 1.6%（< 2%）。
 val spreadPixels = IntArray(60 * 16) { i ->
@@ -4050,15 +4141,15 @@ check(
     "实际 share=${looseSeed?.share}",
 )
 check(
-    "★ 宽松档下调色板不为 null —— 不再掉回与封面无关的默认深色",
-    darkPlayerPaletteFromPixels(spreadPixels) != null,
+    "★ 宽松档下调色板不为 null —— 不再掉回与封面无关的默认色",
+    playerPaletteFromPixels(spreadPixels) != null,
 )
-// 低饱和种子（宽容档的常见结果）：强调色必须垫饱和度下限，否则和"没取色"看不出区别
+// 低饱和种子（宽松档的常见结果）：强调色必须垫饱和度下限，否则和"没取色"看不出区别
 val washedPixels = IntArray(1000) { i ->
     if (i % 2 == 0) hslToArgb(205f, 0.12f, 0.50f) else hslToArgb(25f, 0.12f, 0.50f)
 }
 check("低饱和封面严格档也挑不出（饱和 0.12 < 0.28）", pickArtworkSeed(washedPixels) == null)
-val washedPalette = darkPlayerPaletteFromPixels(washedPixels)
+val washedPalette = playerPaletteFromPixels(washedPixels)
 check("低饱和封面仍有调色板（走宽松档）", washedPalette != null)
 check(
     "★ 低饱和封面的强调色有饱和度下限（不变成灰白）",
@@ -4068,11 +4159,6 @@ check(
             ((washedPalette.accent shr 8) and 0xFF).toFloat(),
             (washedPalette.accent and 0xFF).toFloat(),
         )[1] >= 0.20f,
-)
-check(
-    "★ 纯白/纯灰仍然不取色（宽松档也不该把灰图当有颜色）",
-    darkPlayerPaletteFromPixels(whitePixels) == null &&
-        darkPlayerPaletteFromPixels(grayPixels) == null,
 )
 }
 

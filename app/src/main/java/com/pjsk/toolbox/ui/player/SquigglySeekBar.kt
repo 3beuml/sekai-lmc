@@ -11,7 +11,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -24,12 +26,10 @@ import kotlin.math.sin
 /**
  * 波浪形进度条（对应留声器里那条 `SquigglyProgress`）。
  *
- * ## ⚠️ 现在**没有界面用它**（0.1.36 起）
+ * ## 演进
  *
- * 用户拍板把播放器换成 Google 原生的 Material 3 Slider，所以 `PlayerScreen` 里
- * 这一处已经改成 `Slider` 了。**这个文件是故意留着的**，不是忘了删：
- * 换回波浪条只需要把 `PlayerScreen` 里那个 `Slider(...)` 换回 `SquigglySeekBar(...)`，
- * 交互语义（松手才 seek）两者是一致的，见下面「拖动策略」。
+ *  0.1.36 曾一度换成 M3 `Slider`；0.1.37 用户拍板换回波浪（线加粗到 2dp）；
+ *  0.1.43 再把"当前位置"从圆点改成**竖条**，已播段比未播粗一档。
  *
  * ## 为什么自己画
  *
@@ -46,11 +46,14 @@ import kotlin.math.sin
  *
  * @param fraction 当前进度（0~1），由调用方从播放状态算好
  * @param onSeek [fraction] 松手/点击时回调（0~1）
- * @param trackWidth 线宽。**0.1.37 起从写死的 3px 改成 2dp** —— 原来那个 3f 是**像素**，
+ * @param trackWidth 未播部分的线宽。**0.1.37 起从写死的 3px 改成 2dp** —— 原来那个 3f 是**像素**，
  *   在 520dpi 的机器上只有 0.92dp，细到几乎看不见；用户反馈"把线稍微增粗一点"，
  *   这里顺手改成 dp（与密度无关，换机型不会又变回一条发丝线）。
- * @param thumbRadius 静止时的手柄半径（dp）。原来写死 6f **像素** ≈ 1.8dp，基本是个点。
- * @param thumbRadiusDragging 拖动时的手柄半径（dp，放大给手指反馈）。
+ * @param progressWidth 已播部分的线宽（0.1.43 比未播**粗一档**，让"听到哪了"一眼可见）。
+ * @param thumbWidth / @param thumbHeight 当前位置的**竖条**尺寸（0.1.43 从圆点改成条，
+ *   用户参考留声器："当前位置用条来表示"）。竖条**固定在中线**上下居中，
+ *   不跟着正弦波起伏 —— 否则会穿模，看着像线断了。
+ * @param thumbScaleDragging 拖动时竖条的放大倍数（手指反馈）。
  */
 @Composable
 fun SquigglySeekBar(
@@ -61,8 +64,10 @@ fun SquigglySeekBar(
     waveLength: Dp = 27.dp,
     amplitude: Dp = 2.7.dp,
     trackWidth: Dp = 2.dp,
-    thumbRadius: Dp = 3.5.dp,
-    thumbRadiusDragging: Dp = 5.dp,
+    progressWidth: Dp = 3.5.dp,
+    thumbWidth: Dp = 4.dp,
+    thumbHeight: Dp = 18.dp,
+    thumbScaleDragging: Float = 1.25f,
 ) {
     // null = 没在拖；否则是拖动中的预览分数
     var dragFraction by remember { mutableStateOf<Float?>(null) }
@@ -75,8 +80,9 @@ fun SquigglySeekBar(
     val waveLengthPx = with(density) { waveLength.toPx() }
     val amplitudePx = with(density) { amplitude.toPx() }
     val trackWidthPx = with(density) { trackWidth.toPx() }
-    val thumbPx = with(density) { thumbRadius.toPx() }
-    val thumbDraggingPx = with(density) { thumbRadiusDragging.toPx() }
+    val progressWidthPx = with(density) { progressWidth.toPx() }
+    val thumbWidthPx = with(density) { thumbWidth.toPx() }
+    val thumbHeightPx = with(density) { thumbHeight.toPx() }
 
     Canvas(
         modifier = modifier
@@ -115,7 +121,7 @@ fun SquigglySeekBar(
             strokeWidth = trackWidthPx,
         )
 
-        // 已播部分：正弦波
+        // 已播部分：正弦波（比未播粗一档）
         if (progressWidth > 0f) {
             val path = Path()
             path.moveTo(0f, centerY)
@@ -128,14 +134,22 @@ fun SquigglySeekBar(
             }
             // 收尾对齐到准确位置，免得波尾因为步进取整短一截
             path.lineTo(progressWidth, centerY)
-            drawPath(path = path, color = progressColor, style = Stroke(width = trackWidthPx))
+            drawPath(path = path, color = progressColor, style = Stroke(width = progressWidthPx))
         }
 
-        // 拖动把手
-        drawCircle(
+        // 当前位置：**竖条**（0.1.43 用户拍板，替代原来的圆点）
+        //
+        // 高度固定、上下居中，两端做圆角；拖动时整体放大给手指反馈。
+        val scale = if (dragFraction != null) thumbScaleDragging else 1f
+        val barW = thumbWidthPx * scale
+        val barH = thumbHeightPx * scale
+        // 贴着两端时别让竖条跑出画面（否则最后一秒会被裁掉一半）
+        val barCenterX = progressWidth.coerceIn(barW / 2f, size.width - barW / 2f)
+        drawRoundRect(
             color = thumbColor,
-            radius = if (dragFraction != null) thumbDraggingPx else thumbPx,
-            center = Offset(progressWidth, centerY),
+            topLeft = Offset(barCenterX - barW / 2f, centerY - barH / 2f),
+            size = Size(barW, barH),
+            cornerRadius = CornerRadius(barW / 2f, barW / 2f),
         )
     }
 }
