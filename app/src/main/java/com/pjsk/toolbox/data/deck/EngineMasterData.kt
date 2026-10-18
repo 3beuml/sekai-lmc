@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.data.deck
+﻿package com.pjsk.toolbox.data.deck
 
 import com.pjsk.toolbox.data.profile.PlayerSnapshot
 import com.pjsk.toolbox.ui.common.intOrNull
@@ -168,11 +168,13 @@ fun restoreMasterLessonsJson(croppedRows: List<String>): String =
     joinObjects(croppedRows) { obj ->
         val rarity = obj.str("cardRarityType") ?: return@joinObjects null
         val rank = obj.intOrNull("masterRank") ?: return@joinObjects null
-        val bonus = doubleArray(obj, "b")
+        // ⚠️ 这三个字段上游是 **i32**，写成 200.0 会被引擎拒绝：
+        //   「invalid type: floating point '0.0', expected i32」
+        val bonus = intArray(obj, "b")
         buildJsonObject {
             put("cardRarityType", rarity)
             put("masterRank", rank)
-            for (i in 0..2) put("power${i + 1}BonusFixed", bonus.getOrElse(i) { 0.0 })
+            for (i in 0..2) put("power${i + 1}BonusFixed", bonus.getOrElse(i) { 0 })
         }
     }
 
@@ -258,6 +260,12 @@ fun buildPowerParams(limit: Int = 10, timeoutMs: Int = 60_000): String = buildSt
 
 // ── 小工具 ──
 
+/** 整数序列（`masterLessons` 的突破加成是 i32，不能用 Double 序列化）。 */
+private fun intArray(obj: JsonObject, key: String): List<Int> {
+    val array = obj[key] as? JsonArray ?: return emptyList()
+    return array.mapNotNull { (it as? JsonPrimitive)?.content?.toDoubleOrNull()?.toInt() }
+}
+
 private fun doubleArray(obj: JsonObject, key: String): List<Double> {
     val array = obj[key] as? JsonArray ?: return emptyList()
     return array.mapNotNull { (it as? JsonPrimitive)?.content?.toDoubleOrNull() }
@@ -296,3 +304,4 @@ internal fun quote(text: String): String {
     sb.append('"')
     return sb.toString()
 }
+
