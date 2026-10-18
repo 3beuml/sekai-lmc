@@ -28,6 +28,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -70,6 +71,7 @@ import com.pjsk.toolbox.data.profile.OwnedCharacter
 import com.pjsk.toolbox.data.profile.PlayerFetchResult
 import com.pjsk.toolbox.data.profile.PlayerSnapshot
 import com.pjsk.toolbox.data.profile.RarityBucket
+import com.pjsk.toolbox.data.profile.availableDifficulties
 import com.pjsk.toolbox.data.profile.cardStats
 import com.pjsk.toolbox.data.profile.difficultyLabel
 import com.pjsk.toolbox.data.profile.materialStats
@@ -78,6 +80,8 @@ import com.pjsk.toolbox.data.profile.rarityDistribution
 import com.pjsk.toolbox.data.profile.rarityLabel
 import com.pjsk.toolbox.data.profile.sortBonds
 import com.pjsk.toolbox.data.profile.sortCharacters
+import com.pjsk.toolbox.data.profile.songsWithDifficulty
+import com.pjsk.toolbox.data.settings.ScoreMetric
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.settings.NameLanguage
@@ -154,6 +158,17 @@ fun MyPlayerScreen(
     // 这几个提到 Scaffold 外面：羁绊面板画在 Scaffold 之后，拿不到 Column 内部的局部变量。
     val region = account?.let { ServerRegion.fromId(it.server) } ?: ServerRegion.DEFAULT
     val charsById = remember(allCharacters) { allCharacters.associateBy { it.id } }
+
+    // 歌曲成绩的分母：「每个难度有多少首曲目」。和「我的歌曲」用同一个函数算，
+    // 两处的百分比必须对得上，否则用户会觉得其中一处在骗人。
+    val scoreMetric by settings.scoreMetric.collectAsState()
+    val difficultyLevels by remember { musicRepository.difficultyLevels }.collectAsState(initial = emptyMap())
+    val allMusics by remember { container.homeRepository.musics }.collectAsState(initial = emptyList())
+    val songsTotal = remember(allMusics, difficultyLevels) {
+        availableDifficulties(difficultyLevels).associateWith { d ->
+            songsWithDifficulty(allMusics, difficultyLevels, d).size
+        }
+    }
 
     // 解绑：清偏好 + 删本地快照，然后返回上一页。
     val doUnbind: () -> Unit = {
@@ -275,21 +290,51 @@ fun MyPlayerScreen(
                 if (music.isEmpty()) {
                     HintText("快照里没有歌曲成绩。")
                 } else {
+                    // 选中指标从偏好里来（默认 AP），切了之后「我的歌曲」也跟着进对应那一档
+                    val metricCount: (DifficultyStat) -> Int = { stat ->
+                        if (scoreMetric == ScoreMetric.AP) stat.allPerfect else stat.fullCombo
+                    }
                     val totalPlayed = music.sumOf { it.played }
-                    val totalAp = music.sumOf { it.allPerfect }
+                    val totalMetric = music.sumOf(metricCount)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         ProgressRing(
-                            fraction = if (totalPlayed == 0) 0f else totalAp.toFloat() / totalPlayed,
-                            centerTop = "$totalAp",
-                            centerBottom = "AP",
+                            fraction = if (totalPlayed == 0) 0f else totalMetric.toFloat() / totalPlayed,
+                            centerTop = "$totalMetric",
+                            centerBottom = scoreMetric.label,
                             color = accent,
                         )
                         Spacer(Modifier.width(16.dp))
-                        HintText("AP 占全部已打曲目的比例（按难度分别见下面）")
+                        Column(modifier = Modifier.weight(1f)) {
+                            // AP ↔ FC 二态切换：点标签就切（用户要求），默认 AP
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                ScoreMetric.entries.forEach { option ->
+                                    FilterChip(
+                                        selected = scoreMetric == option,
+                                        onClick = { settings.setScoreMetric(option) },
+                                        label = { Text(option.label) },
+                                    )
+                                }
+                            }
+                            HintText(
+                                "${scoreMetric.label} 占全部已打曲目的比例。" +
+                                    "FC 含 AP，所以切到 FC 数字只会更多；按难度见下面。",
+                            )
+                        }
                     }
                     Spacer(Modifier.height(10.dp))
-                    val maxPlayed = music.maxOf { it.played }.coerceAtLeast(1)
-                    music.forEach { diff -> MusicBarRow(diff, maxPlayed, accent) }
+                    // 各难度的条：分子是选中指标，分母是**内置谱面里真有这一难度**的曲目数
+                    // —— 和「我的歌曲」用同一个口径，不然两处的百分比对不上。
+                    music.forEach { diff ->
+                        val total = songsTotal[diff.difficulty] ?: 0
+                        BarRow(
+                            label = difficultyLabel(diff.difficulty),
+                            fraction = if (total <= 0) 0f else metricCount(diff).toFloat() / total,
+                            color = accent,
+                            valueText = "${metricCount(diff)} / $total",
+                            labelWidth = 52,
+                            valueWidth = 92,
+                        )
+                    }
                 }
             }
 
@@ -551,6 +596,8 @@ private fun BarRow(
     color: Color,
     valueText: String,
     labelWidth: Int = 56,
+    /** 右侧数值列的宽度。「12 / 372」这种要宽一些，`Lv.8` 只要 84dp。 */
+    valueWidth: Int = 84,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 3.dp)) {
         Text(
@@ -579,7 +626,7 @@ private fun BarRow(
         Text(
             text = valueText,
             style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.width(84.dp),
+            modifier = Modifier.width(valueWidth.dp),
         )
     }
 }
@@ -591,16 +638,6 @@ private fun RarityBarRow(bucket: RarityBucket, max: Int) {
         fraction = bucket.count.toFloat() / max,
         color = MaterialTheme.colorScheme.primary,
         valueText = "${bucket.count} 张",
-    )
-}
-
-@Composable
-private fun MusicBarRow(stat: DifficultyStat, max: Int, accent: Color) {
-    BarRow(
-        label = difficultyLabel(stat.difficulty),
-        fraction = stat.played.toFloat() / max,
-        color = accent,
-        valueText = "FC ${stat.fullCombo} · AP ${stat.allPerfect}",
     )
 }
 

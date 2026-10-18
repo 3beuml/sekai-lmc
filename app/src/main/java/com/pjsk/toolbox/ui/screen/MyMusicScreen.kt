@@ -6,6 +6,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -60,11 +62,13 @@ import com.pjsk.toolbox.data.profile.availableDifficulties
 import com.pjsk.toolbox.data.profile.difficultyLabel
 import com.pjsk.toolbox.data.profile.difficultySummary
 import com.pjsk.toolbox.data.profile.filterSongsByPlayStatus
+import com.pjsk.toolbox.data.profile.isWorkList
 import com.pjsk.toolbox.data.profile.playStatusIndex
 import com.pjsk.toolbox.data.profile.songsWithDifficulty
 import com.pjsk.toolbox.data.profile.sortForWork
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
+import com.pjsk.toolbox.data.settings.ScoreMetric
 import com.pjsk.toolbox.ui.common.EmptyState
 import com.pjsk.toolbox.ui.common.PlayerDataGate
 import com.pjsk.toolbox.ui.common.RemoteImage
@@ -107,6 +111,7 @@ fun MyMusicScreen(
     val musicRepository = remember { container.musicRepository }
 
     val account by settings.playerAccount.collectAsState()
+    val scoreMetric by settings.scoreMetric.collectAsState()
     val musics by container.homeRepository.musics.collectAsState(initial = emptyList())
     val levels by musicRepository.difficultyLevels.collectAsState(initial = emptyMap())
 
@@ -146,6 +151,9 @@ fun MyMusicScreen(
             musics = musics,
             levels = levels,
             account = account,
+            // 进来时默认停在「我的」页那个切换选中的指标（默认 AP）那一档
+            initialFilter = if (scoreMetric == ScoreMetric.AP) SongPlayFilter.AP else SongPlayFilter.FC,
+            metric = scoreMetric,
             onBack = onBack,
             onOpenDetail = onOpenDetail,
         )
@@ -187,7 +195,7 @@ private fun defaultDifficulty(available: List<String>): String? {
     return available.firstOrNull { it == "master" } ?: available.last()
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun MyMusicContent(
     region: ServerRegion,
@@ -195,6 +203,9 @@ private fun MyMusicContent(
     musics: List<HomeMusic>,
     levels: Map<Int, Map<String, Int>>,
     account: PlayerAccount?,
+    initialFilter: SongPlayFilter,
+    /** 「我的」页那个切换当前看的是 AP 还是 FC —— 难度 chip 上写的数跟着它。 */
+    metric: ScoreMetric,
     onBack: () -> Unit,
     onOpenDetail: (Int) -> Unit,
 ) {
@@ -203,8 +214,8 @@ private fun MyMusicContent(
     // 记住用户选的难度 / 状态：从歌曲详情返回时不能跳回默认值。
     // ⚠️ 存**名字**而不是下标：难度集合是异步来的，下标会随数据到达而错位。
     var difficultyName by rememberSaveable { mutableStateOf("") }
-    var filterName by rememberSaveable { mutableStateOf(SongPlayFilter.ALL.name) }
-    val filter = SongPlayFilter.entries.firstOrNull { it.name == filterName } ?: SongPlayFilter.ALL
+    var filterName by rememberSaveable { mutableStateOf(initialFilter.name) }
+    val filter = SongPlayFilter.entries.firstOrNull { it.name == filterName } ?: initialFilter
     val difficulty = difficultyName.takeIf { it in available } ?: defaultDifficulty(available).orEmpty()
 
     // 计分板：每个难度的汇总（一个难度一行，方便横向比较自己卡在哪一档）
@@ -225,13 +236,13 @@ private fun MyMusicContent(
     }
     val visible = remember(ofDifficulty, index, filter, levels, difficulty) {
         val filtered = filterSongsByPlayStatus(ofDifficulty, index, filter)
-        if (filter == SongPlayFilter.NO_FC || filter == SongPlayFilter.NO_AP) {
+        if (isWorkList(filter)) {
             sortForWork(filtered, levels, difficulty)
         } else {
             filtered
         }
     }
-    // chip 上的数量：一次算完，别在 4 个 chip 里各跑一遍整表
+    // chip 上的数量：一次算完，别在 6 个 chip 里各跑一遍整表
     val filterCounts = remember(ofDifficulty, index) {
         SongPlayFilter.entries.associateWith { option ->
             filterSongsByPlayStatus(ofDifficulty, index, option).size
@@ -250,8 +261,13 @@ private fun MyMusicContent(
                             text = buildString {
                                 append(account?.let { "UID ${it.gameId}" } ?: "未绑定")
                                 if (current != null) {
-                                    append(" · ${difficultyLabel(current.difficulty)} 已打 ")
-                                    append("${current.played}/${current.total}")
+                                    // 副标题跟着当前 chip 走：停在「AP 的」就显示 AP 的数，
+                                    // 不能固定写"已打"，否则和下面选中的 chip 对不上。
+                                    append(" · ${difficultyLabel(current.difficulty)} ")
+                                    append(filter.label)
+                                    append(" ")
+                                    append(filterCounts[filter] ?: 0)
+                                    append("/${current.total}")
                                 }
                             },
                             style = MaterialTheme.typography.labelSmall,
@@ -287,12 +303,13 @@ private fun MyMusicContent(
             ) {
                 available.forEach { d ->
                     val s = summaries.firstOrNull { it.difficulty == d }
+                    // 指标由「我的」页那个 AP/FC 切换决定：切到 FC 后这一行就全是 FC 数
+                    val metricCount = if (metric == ScoreMetric.AP) s?.allPerfect else s?.fullCombo
                     FilterChip(
                         selected = d == difficulty,
                         onClick = { difficultyName = d },
                         label = {
-                            // chip 上直接写 AP 数：这一行本身就是"我在各难度什么水平"的速览
-                            Text("${difficultyLabel(d)} ${s?.allPerfect ?: 0}AP")
+                            Text("${difficultyLabel(d)} ${metricCount ?: 0}${metric.label}")
                         },
                     )
                 }
@@ -338,12 +355,15 @@ private fun MyMusicContent(
             }
 
             // ── 状态筛选 ──
-            Row(
+            // ⚠️ 六个 chip，每个都带数字，一行放不下（六×约 90dp ≈ 540dp，屏幕只有约 390dp）。
+            // 用 FlowRow 折成两行，而不是横向滚动 —— 这一行是用来**横向比较**的，
+            // 藏一半在屏幕外就失去意义了。
+            FlowRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 12.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
                 SongPlayFilter.entries.forEach { option ->
                     FilterChip(
@@ -353,12 +373,20 @@ private fun MyMusicContent(
                     )
                 }
             }
+            Text(
+                text = "未 FC / 未 AP 含从未打过的曲目；FC 含 AP。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+            )
 
             if (visible.isEmpty()) {
                 EmptyState(
                     title = when (filter) {
                         SongPlayFilter.NO_FC -> "这一难度已经全部 FC 了"
                         SongPlayFilter.NO_AP -> "这一难度已经全部 AP 了"
+                        SongPlayFilter.FC -> "这一难度还没有 FC 过的"
+                        SongPlayFilter.AP -> "这一难度还没有 AP 过的"
                         SongPlayFilter.PLAYED -> "这一难度还没打过"
                         SongPlayFilter.ALL -> "没有可显示的歌曲"
                     },

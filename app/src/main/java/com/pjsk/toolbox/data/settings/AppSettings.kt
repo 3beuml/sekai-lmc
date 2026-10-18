@@ -51,6 +51,19 @@ enum class VocalMode(val label: String) {
 }
 
 /**
+ * 「歌曲成绩」按哪个指标看。
+ *
+ * AP（All Perfect）与 FC（Full Combo）在数据上不是并列关系：**AP 也算 FC**
+ * （`fullComboFlg` 在 AP 时同样为 true）。所以切到 FC 时数字只会更多，
+ * 这一点在界面上要让人看得出来，而不是让人以为"两个数字打架"。
+ */
+enum class ScoreMetric(val label: String) {
+    AP("AP"),
+    FC("FC"),
+    ;
+}
+
+/**
  * 用户偏好。
  *
  * 用 `SharedPreferences` 而不是 DataStore：这里只有几个开关，
@@ -101,6 +114,25 @@ class AppSettings(context: Context) {
     fun setVocalMode(mode: VocalMode) {
         prefs.edit().putString(KEY_VOCAL_MODE, mode.name).apply()
         _vocalMode.value = mode
+    }
+
+    /**
+     * 「歌曲成绩」看 **AP 还是 FC**（「我的」页那个二态切换）。
+     *
+     * 为什么存进偏好而不是页面内部状态：它同时决定「我的歌曲」进来时默认停在哪一档，
+     * 跨页面了。和 [vocalMode] 是同一类东西 —— 一个长期有效的两态视图开关。
+     *
+     * 默认 [ScoreMetric.AP]：这两个字在玩家嘴里先说的是"AP"，而且 AP 更稀缺，
+     * 默认看更难的那个不会让人误以为自己打得更好。
+     */
+    private val _scoreMetric = MutableStateFlow(
+        enumOrDefault(prefs.getString(KEY_SCORE_METRIC, null), ScoreMetric.AP),
+    )
+    val scoreMetric: StateFlow<ScoreMetric> = _scoreMetric.asStateFlow()
+
+    fun setScoreMetric(metric: ScoreMetric) {
+        prefs.edit().putString(KEY_SCORE_METRIC, metric.name).apply()
+        _scoreMetric.value = metric
     }
 
     fun setThemeMode(mode: ThemeMode) {
@@ -223,6 +255,7 @@ class AppSettings(context: Context) {
         const val KEY_FAVORITE_SONGS = "favorite_songs"
         const val KEY_PLAY_MODE = "play_mode"
         const val KEY_VOCAL_MODE = "vocal_mode"
+        const val KEY_SCORE_METRIC = "score_metric"
         const val KEY_PREFERRED_VOCALS = "preferred_vocals"
         const val KEY_PLAYER_SERVER = "player_server"
         const val KEY_PLAYER_GAME_ID = "player_game_id"

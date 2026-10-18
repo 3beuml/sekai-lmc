@@ -28,12 +28,21 @@ data class SongPlayStatus(
     }
 }
 
-/** 「我的歌曲」顶部的状态筛选。 */
+/**
+ * 「我的歌曲」顶部的状态筛选。
+ *
+ * ⚠️ **[FC] 包含 [AP]**：游戏数据里 AP 的 `fullComboFlg` 也是 true，AP 是 FC 的子集。
+ * 所以恒有 `AP + 未AP = 全部`、`FC + 未FC = 全部`、`AP ≤ FC ≤ 已打过 ≤ 全部`。
+ * 如果把 [FC] 做成"只 FC 不 AP"，前两条等式就不成立 —— 用户一加就知道数字错了，
+ * 而且"我 FC 了这首"在 AP 之后仍然是真话。
+ */
 enum class SongPlayFilter(val label: String) {
     ALL("全部"),
     PLAYED("已打过"),
-    NO_FC("没 FC"),
-    NO_AP("没 AP"),
+    FC("FC 的"),
+    AP("AP 的"),
+    NO_FC("未 FC"),
+    NO_AP("未 AP"),
 }
 
 /**
@@ -87,6 +96,8 @@ fun songsWithDifficulty(
  * 语义：
  *  - [SongPlayFilter.ALL]  → 原样
  *  - [SongPlayFilter.PLAYED] → 有成绩的
+ *  - [SongPlayFilter.FC]  → FC 过的（**含 AP 的**，见枚举上的说明）
+ *  - [SongPlayFilter.AP]  → AP 过的
  *  - [SongPlayFilter.NO_FC]  → 没 FC 的（含从没打过的）
  *  - [SongPlayFilter.NO_AP]  → 没 AP 的（含从没打过的）
  */
@@ -97,9 +108,20 @@ fun filterSongsByPlayStatus(
 ): List<HomeMusic> = when (filter) {
     SongPlayFilter.ALL -> source
     SongPlayFilter.PLAYED -> source.filter { index[it.id]?.played == true }
+    SongPlayFilter.FC -> source.filter { index[it.id]?.fullCombo == true }
+    SongPlayFilter.AP -> source.filter { index[it.id]?.allPerfect == true }
     SongPlayFilter.NO_FC -> source.filter { index[it.id]?.fullCombo != true }
     SongPlayFilter.NO_AP -> source.filter { index[it.id]?.allPerfect != true }
 }
+
+/**
+ * 哪些筛选属于「工作清单」—— 这些列表按难度等级从低到高排。
+ *
+ * 正面的（FC 的 / AP 的 / 已打过）保持传入顺序（歌曲页是"最新上线在前"），
+ * 因为那几个列表是"我打出了什么"，按时间看更有意义。
+ */
+fun isWorkList(filter: SongPlayFilter): Boolean =
+    filter == SongPlayFilter.NO_FC || filter == SongPlayFilter.NO_AP
 
 /**
  * 「没 FC / 没 AP」列表的排序：**按难度等级从低到高**。

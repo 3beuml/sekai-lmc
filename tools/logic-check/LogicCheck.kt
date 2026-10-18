@@ -148,6 +148,7 @@ import com.pjsk.toolbox.data.profile.availableDifficulties
 import com.pjsk.toolbox.data.profile.difficultyOrder
 import com.pjsk.toolbox.data.profile.difficultySummary
 import com.pjsk.toolbox.data.profile.filterSongsByPlayStatus
+import com.pjsk.toolbox.data.profile.isWorkList
 import com.pjsk.toolbox.data.profile.playStatusIndex
 import com.pjsk.toolbox.data.profile.songsWithDifficulty
 import com.pjsk.toolbox.data.profile.sortForWork
@@ -3016,6 +3017,46 @@ fun main(args: Array<String>) {
         "★ 也从没打过的歌出现在「已打过」里就不对了",
         filterSongsByPlayStatus(listOf(wsong(5)), emptyMap(), SongPlayFilter.PLAYED).size,
         0,
+    )
+
+    // ── 六个 chip 里新增的「FC 的」「AP 的」 ──
+    checkEq(
+        "★ FC 的包含 AP 的（AP 也是 FC）",
+        filterSongsByPlayStatus(masterSongs, masterIndex, SongPlayFilter.FC).map { it.id },
+        listOf(1, 2),
+    )
+    checkEq(
+        "AP 的只有真 AP 的",
+        filterSongsByPlayStatus(masterSongs, masterIndex, SongPlayFilter.AP).map { it.id },
+        listOf(1),
+    )
+    checkEq("六个 chip 一个不少", SongPlayFilter.entries.map { it.label }, listOf("全部", "已打过", "FC 的", "AP 的", "未 FC", "未 AP"))
+
+    // ★ 恒等式：这几条是"分母拿错"的探针。任何一条不成立，说明某个 chip 的口径偏了。
+    // 注意 FC ⊇ AP 是**设计决定**（见 SongPlayFilter 的注释），不是巧合。
+    val countOf = { f: SongPlayFilter -> filterSongsByPlayStatus(masterSongs, masterIndex, f).size }
+    checkEq(
+        "★ FC + 未 FC = 全部",
+        countOf(SongPlayFilter.FC) + countOf(SongPlayFilter.NO_FC),
+        countOf(SongPlayFilter.ALL),
+    )
+    checkEq(
+        "★ AP + 未 AP = 全部",
+        countOf(SongPlayFilter.AP) + countOf(SongPlayFilter.NO_AP),
+        countOf(SongPlayFilter.ALL),
+    )
+    check(
+        "★ AP ≤ FC ≤ 已打过 ≤ 全部（层层包含，不会出现 FC 比已打过还多）",
+        countOf(SongPlayFilter.AP) <= countOf(SongPlayFilter.FC) &&
+            countOf(SongPlayFilter.FC) <= countOf(SongPlayFilter.PLAYED) &&
+            countOf(SongPlayFilter.PLAYED) <= countOf(SongPlayFilter.ALL),
+        "AP=${countOf(SongPlayFilter.AP)} FC=${countOf(SongPlayFilter.FC)} " +
+            "已打=${countOf(SongPlayFilter.PLAYED)} 全部=${countOf(SongPlayFilter.ALL)}",
+    )
+    checkEq(
+        "只有「未 FC / 未 AP」按等级升序排（其余保持歌曲顺序）",
+        SongPlayFilter.entries.filter { isWorkList(it) },
+        listOf(SongPlayFilter.NO_FC, SongPlayFilter.NO_AP),
     )
 
     checkEq(
