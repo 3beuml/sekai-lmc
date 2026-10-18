@@ -1,4 +1,4 @@
-﻿import com.pjsk.toolbox.data.card.CardArtPlan
+import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
 import com.pjsk.toolbox.data.card.CardQuery
 import com.pjsk.toolbox.data.card.CardSort
@@ -155,6 +155,7 @@ import com.pjsk.toolbox.ui.common.intOrNull
 import com.pjsk.toolbox.data.deck.buildMasterDataPayload
 import com.pjsk.toolbox.data.deck.buildPowerParams
 import com.pjsk.toolbox.data.deck.buildUserJson
+import com.pjsk.toolbox.data.deck.parseDeckRecommendResult
 import com.pjsk.toolbox.data.deck.restoreAreaItemLevelsJson
 import com.pjsk.toolbox.data.deck.restoreCardsJson
 import com.pjsk.toolbox.data.deck.restoreHonorsJson
@@ -3751,12 +3752,22 @@ fun main(args: Array<String>) {
         restoredAreaLevel.containsKey("targetGameCharacterId"),
         false,
     )
+    // ⚠️ 这里期望的是**整数** `200`，不是 `200.0`。
+    // 0.1.27 真机报错 `invalid type: floating point '0.0', expected i32` ——
+    // 上游 `power1/2/3BonusFixed` 是 i32，写成 `200.0` 引擎直接拒收整张表。
+    // 当时只修了 EngineMasterData，这条断言留在旧口径上，于是自检从 0.1.27 起一直是红的
+    // （那几批只跑了 compile-check，没跑这个）。别把它改回 "200.0"。
+    val masterLesson = json.parseToJsonElement(
+        restoreMasterLessonsJson(listOf("""{"cardRarityType":"rarity_4","masterRank":2,"b":[200,200,200]}""")),
+    ).jsonArray.first().jsonObject
     checkEq(
         "masterLessons 还原成 powerNBonusFixed",
-        json.parseToJsonElement(
-            restoreMasterLessonsJson(listOf("""{"cardRarityType":"rarity_4","masterRank":2,"b":[200,200,200]}""")),
-        ).jsonArray.first().jsonObject.stringValue("power3BonusFixed"),
-        "200.0",
+        masterLesson.stringValue("power3BonusFixed"),
+        "200",
+    )
+    check(
+        "★ masterLessons 的加成是整数（写成 200.0 引擎会报 expected i32）",
+        masterLesson.stringValue("power1BonusFixed")?.contains('.') == false,
     )
     checkEq(
         "称号还原时每级补回 honorId",
@@ -3817,6 +3828,129 @@ fun main(args: Array<String>) {
     )
     checkEq("userCharacters 带角色等级", (engineUserJson["userCharacters"]!!.jsonArray.first() as JsonObject).stringValue("characterRank")?.toIntOrNull(), 42)
     checkEq("userHonors 带称号等级", (engineUserJson["userHonors"]!!.jsonArray.first() as JsonObject).stringValue("level")?.toIntOrNull(), 1)
+
+    // ─────────────────────────────────────────────────────────
+    section("29. 组卡结果页：解析引擎返回（批次 D 第 1 步）")
+    // 引擎输出的形状以 `docs/research/_deck_probe/allium-README.en.md` 的样例为准：
+    //   completion / timed_out / diagnostics.pool_size / timing.{build_pool_ms,search_ms} / decks[]
+    // 而 moesekai 的 TS 绑定把这些性能字段放在 `performance` 下 —— 两种都要认（见 parsers 注释）。
+    val engineOk = parseDeckRecommendResult(
+        """
+        {
+          "completion": "complete",
+          "timed_out": false,
+          "diagnostics": { "pool_size": 194 },
+          "timing": { "build_pool_ms": 1.4, "search_ms": 0.4 },
+          "decks": [
+            {
+              "rank": 1,
+              "total_power": 361234,
+              "target_value": 361234,
+              "skill_score": 640.0,
+              "live_score": 1234567,
+              "event_point": 1234,
+              "event_bonus_total": 25,
+              "cards": [
+                { "card_id": 111, "rarity": "rarity_4", "attr": "cool", "character_id": 3,
+                  "level": 60, "master_rank": 5, "power_total": 72247,
+                  "skill_score_up": 120.0, "skill_level": 4, "trained": true,
+                  "episode1_read": true, "episode2_read": false,
+                  "has_canvas_bonus": true, "canvas_power": 600, "event_bonus": 25 },
+                { "card_id": 222, "power_total": 72247 },
+                { "card_id": 333, "power_total": 72247 },
+                { "card_id": 444, "power_total": 72247 },
+                { "card_id": 555, "power_total": 72246 }
+              ]
+            }
+          ]
+        }
+        """.trimIndent(),
+    )
+    checkEq("解析出 1 套结果", engineOk.decks.size, 1)
+    checkEq("★ completion 原样取回（这是「精确 Top-K」的唯一凭据）", engineOk.completion, "complete")
+    checkEq("completion=complete → isExact", engineOk.isExact, true)
+    checkEq("排名取引擎给的 rank", engineOk.decks.first().rank, 1)
+    checkEq("整套综合力", engineOk.decks.first().totalPower, 361234)
+    // 性能字段：引擎给的是 diagnostics + timing，不是 performance
+    checkEq("★ 候选池从 diagnostics.pool_size 读", engineOk.poolSize, 194)
+    checkEq("★ build_pool 从 timing.build_pool_ms 读（1.4 → 1，说明 timing 也被合并进来了）", engineOk.buildPoolMs, 1)
+    checkEq("★ 搜索耗时从 timing.search_ms 读（0.4 ms 截成 0：亚毫秒级，界面另有 JS 侧整数耗时）", engineOk.searchMs, 0)
+    val firstCard = engineOk.decks.first().cards.first()
+    checkEq("★ 逐卡 card_id 就是游戏卡 id（可直接 join 内置 cards.json）", firstCard.cardId, 111)
+    checkEq("逐卡等级", firstCard.level, 60)
+    checkEq("逐卡突破", firstCard.masterRank, 5)
+    checkEq("逐卡综合力", firstCard.powerTotal, 72247)
+    checkEq(
+        "★ skill_score_up 是**百分数**，不做任何换算（120.0 = 120%，不是 1.2）",
+        firstCard.skillScoreUp,
+        120.0,
+    )
+    checkEq("逐卡技能等级", firstCard.skillLevel, 4)
+    checkEq("剧情已读标记", listOf(firstCard.episode1Read, firstCard.episode2Read), listOf(true, false))
+    checkEq("★ 逐卡特训状态（卡图标用特训前还是后，要听引擎的）", firstCard.trained, true)
+    checkEq("画布加成", listOf(firstCard.hasCanvasBonus, firstCard.canvasPower), listOf(true, 600))
+    checkEq("逐卡活动加成（本轮 target=power 用不到，但字段要能读到）", firstCard.eventBonus, 25)
+    checkEq("event_point 读成 Int", engineOk.decks.first().eventPoint, 1234)
+    checkEq("event_bonus_total 读成 Int", engineOk.decks.first().eventBonusTotal, 25)
+
+    // 缺字段的条目：没有 card_id 的卡直接丢（接不到内置卡表就等于无法显示），
+    // 但**整套不能因此消失** —— 少一格比整页空白好。
+    val engineSparse = parseDeckRecommendResult(
+        """{"decks":[{"rank":1,"cards":[{"card_id":9},{"rarity":"rarity_4"}]}]}""",
+    )
+    checkEq("★ 没有 card_id 的卡被丢掉，其余保留", engineSparse.decks.first().cards.map { it.cardId }, listOf(9))
+    checkEq("特训字段缺失时退回 false（不抛）", engineSparse.decks.first().cards.first().trained, false)
+    checkEq(
+        "整套和逐卡都没有 power 时给 0（此时确实没有任何数字可显示）",
+        engineSparse.decks.first().totalPower,
+        0,
+    )
+    checkEq(
+        "缺 completion 且没超时 → 视为精确（不误报「可能不是最优」）",
+        engineSparse.isExact,
+        true,
+    )
+
+    // 逐卡 power 存在、整套字段缺失时的兜底
+    val engineFallback = parseDeckRecommendResult(
+        """{"decks":[{"cards":[{"card_id":1,"power_total":100},{"card_id":2,"power_total":250}]}]}""",
+    )
+    checkEq(
+        "★ total_power 缺失 → 逐卡求和兜底",
+        engineFallback.decks.first().totalPower,
+        350,
+    )
+    checkEq("rank 缺失 → 按下标补 1", engineFallback.decks.first().rank, 1)
+
+    // 超时：引擎返回的是"合法但未证明最优"，界面必须能区分
+    val engineTimeout = parseDeckRecommendResult(
+        """{"completion":"timed_out","timed_out":true,"performance":{"pool_size":10,"search_ms":2000},"decks":[]}""",
+    )
+    checkEq("★ timed_out → 不是精确解（不能对用户说「就这 5 套」）", engineTimeout.isExact, false)
+    checkEq("performance 这种写法也认", engineTimeout.searchMs, 2000)
+    check("只有 timed_out 标志、没有 completion 时不当精确", !parseDeckRecommendResult("""{"timed_out":true,"decks":[]}""").isExact)
+
+    // camelCase 别名（引擎入参两种都收；出参万一换成 camelCase 也不该整页归零）
+    val engineCamel = parseDeckRecommendResult(
+        """{"completion":"complete","decks":[{"rank":2,"totalPower":1000,"cards":[
+           {"cardId":7,"characterId":5,"masterRank":3,"powerTotal":200,"skillScoreUp":130.0,
+            "skillLevel":2,"episode1Read":true,"episode2Read":true,"hasCanvasBonus":false,
+            "canvasPower":0}]}]}""",
+    )
+    checkEq("★ camelCase 别名也认（totalPower / cardId / masterRank …）", engineCamel.decks.first().totalPower, 1000)
+    checkEq("camelCase 的逐卡字段", engineCamel.decks.first().cards.first().masterRank, 3)
+    checkEq("camelCase 的角色 id", engineCamel.decks.first().cards.first().characterId, 5)
+
+    // 解析失败必须是**显式失败**，不能悄悄返回空列表（界面上变成"没有推荐"）
+    check(
+        "★ 非 JSON / 没有 decks 都要抛（静默返回空列表会被当成「无可用卡组」）",
+        runCatching { parseDeckRecommendResult("not json") }.isFailure &&
+            runCatching { parseDeckRecommendResult("""{"completion":"complete"}""") }.isFailure,
+    )
+    check(
+        "decks 为空数组是**合法**结果（不抛）",
+        runCatching { parseDeckRecommendResult("""{"decks":[]}""") }.getOrNull()?.decks?.isEmpty() == true,
+    )
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))

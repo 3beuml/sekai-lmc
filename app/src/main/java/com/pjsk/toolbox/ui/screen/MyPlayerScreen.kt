@@ -1,4 +1,4 @@
-﻿package com.pjsk.toolbox.ui.screen
+package com.pjsk.toolbox.ui.screen
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -142,7 +142,7 @@ fun MyPlayerScreen(
     onOpenBest30: () -> Unit,
     /** 「编成」页：逐套摊开看 5 张卡 + 各自的综合力。 */
     onOpenMyDecks: () -> Unit,
-    /** 组卡推荐（批次 D 冒烟）。 */
+    /** 组卡推荐（批次 D：结果页，目前只点亮「综合力 × 单人」）。 */
     onOpenDeckRecommend: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -503,7 +503,11 @@ fun MyPlayerScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Spacer(Modifier.height(4.dp))
-                HintText("试验中：引擎刚接上，结果可能不准确，不要拿它当组卡依据。")
+                HintText(
+                    "基于快照（不是实时）：换卡组、升级后要重新读取才会变。" +
+                        "综合力由组卡引擎计算，比上面「综合力」的数字低约 0.5%（口径差），" +
+                        "两边不能直接相减。",
+                )
             }
 
             CardModule("角色等级") {

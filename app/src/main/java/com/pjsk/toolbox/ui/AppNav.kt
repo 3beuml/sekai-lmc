@@ -1,4 +1,4 @@
-﻿package com.pjsk.toolbox.ui
+package com.pjsk.toolbox.ui
 
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.unit.dp
@@ -480,8 +480,12 @@ fun AppNav() {
 
             composable(Routes.MY_DECK_RECOMMEND) {
                 DeckRecommendScreen(
+                    region = region,
                     onBack = { navController.popBackStack() },
                     onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
+                    onOpenMyPlayer = { navController.navigate(Routes.MY_PLAYER) },
+                    // 推荐结果里的 5 张卡点进去看详情（和编成页同一个落点）
+                    onOpenCard = { cardId -> navController.navigate(Routes.cardDetail(cardId)) },
                 )
             }
 
