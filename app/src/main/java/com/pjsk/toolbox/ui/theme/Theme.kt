@@ -37,6 +37,18 @@ private val LightColors = lightColorScheme(
     surfaceVariant = Color(0xFFDAE5E3),
     onSurfaceVariant = Color(0xFF3F4947),
     outline = Color(0xFF6F7977),
+    // ── Material 3 的 surface 容器色阶 ──
+    // 这一组是「Material You 观感」的底子：卡片/弹层/播放器背景、以及任何
+    // `surfaceContainer*` 取值都靠它们分出层次。不显式给的话，material3 会按
+    // **它自己的中性灰**推导，与这里的青色系对不上（界面会显得发灰、脏）。
+    // 色阶沿用 M3 的规则：Lowest 最亮 → Highest 最暗（深色主题正好相反）。
+    surfaceBright = Color(0xFFFFFFFF),
+    surfaceDim = Color(0xFFD4DBD9),
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFEFF5F3),
+    surfaceContainer = Color(0xFFE8EFED),
+    surfaceContainerHigh = Color(0xFFE2EAE8),
+    surfaceContainerHighest = Color(0xFFDCE5E3),
     error = Color(0xFFBA1A1A),
     onError = Color.White,
 )
@@ -65,6 +77,15 @@ private val DarkColors = darkColorScheme(
     surfaceVariant = Color(0xFF1A1A2E),
     onSurfaceVariant = Color(0xFFC6C4D8),
     outline = Color(0xFF9090A8),
+    // 深色下 surface 容器色阶**方向相反**：数字越大越亮（浅色主题是越大越暗）。
+    // 底色沿用 §Theme.kt 注释里的 `#0F0F1A`，往亮处一档一档抬，保持同一支冷调。
+    surfaceBright = Color(0xFF35353F),
+    surfaceDim = Color(0xFF0F0F1A),
+    surfaceContainerLowest = Color(0xFF0A0A12),
+    surfaceContainerLow = Color(0xFF171721),
+    surfaceContainer = Color(0xFF1B1B26),
+    surfaceContainerHigh = Color(0xFF262632),
+    surfaceContainerHighest = Color(0xFF31313D),
     error = Color(0xFFFFB4AB),
     onError = Color(0xFF690005),
 )

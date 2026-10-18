@@ -2,6 +2,7 @@ package com.pjsk.toolbox.ui.player
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -44,6 +45,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -57,6 +60,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -64,6 +69,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pjsk.toolbox.PjskApp
@@ -256,7 +262,22 @@ fun PlayerScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.surface)
+            // 背景从「一个纯色 surface」改成 **M3 容器色阶的竖向渐变**。
+            //
+            // 为什么：Material You 的观感有一半来自"同一支色系里分层"，而不是"整屏一个颜色"。
+            // 上面深一档（surfaceContainerHigh）压住封面那张图，往下渐到 background，
+            // 于是封面看起来像"浮在页面上"而不是"贴在一块白板上"。
+            //
+            // ⚠️ 这一层是**将来封面取色的落点**（Step 3）：换成由封面种子色派生出的
+            // 两个容器色即可，版式一行都不用动。现在先走主题色，保证没有封面/取色失败时也不难看。
+            .background(
+                Brush.verticalGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.surfaceContainerHigh,
+                        MaterialTheme.colorScheme.background,
+                    ),
+                ),
+            )
             // 顶部让出状态栏：整屏是 edge-to-edge 的，原来没做这一步，
             // 左上角那个「收起」其实压在状态栏（时间/电量）底下。
             .statusBarsPadding()
@@ -315,8 +336,18 @@ fun PlayerScreen(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .size(side)
-                    // 圆角 22dp 照留声器的 album_cover_frame
-                    .clip(RoundedCornerShape(22.dp))
+                    // 圆角 22dp → **28dp**：M3 里"大圆角 + 有落差"是封面的标准处理，
+                    // 22dp 在小屏上偏"方"，加大一档更接近 Google 系播放器的观感。
+                    .shadow(
+                        elevation = 18.dp,
+                        shape = RoundedCornerShape(28.dp),
+                        clip = false,
+                        // 阴影跟着主题色走（默认是纯黑，M3 里阴影也该带一点主色调）
+                        ambientColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                        spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                    )
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest)
                     .clickable { onOpenDetail(track.musicId) },
             ) {
                 RemoteImage(
@@ -374,11 +405,58 @@ fun PlayerScreen(
         )
         Spacer(Modifier.height(16.dp))
 
-        // ── 波浪进度条 ──
-        SquigglySeekBar(
-            fraction = fractionOf(state.displayPositionMs, duration),
+        // ── 进度条：Material 3 Slider ──
+        //
+        // 原来是自定义的 `SquigglySeekBar`（波浪线，见同目录那个文件）。用户拍板换成
+        // Google 原生的 Slider，所以这里用 M3 组件；波浪条的文件**留着**（没有删），
+        // 想换回来改这一处即可。
+        //
+        // 交互语义**和原来完全一致**（这条别改）：
+        //  - 拖动过程中只动本地状态，**不连续 seek** —— 连续 seek 会让 ExoPlayer
+        //    反复重缓冲，滑一下要卡三下；
+        //  - **松手才 seek 一次**（`onValueChangeFinished`）；
+        //  - 时长还不知道时（`known == false`）禁用，避免拖动一个无意义的 0..1。
+        var scrubbing by remember { mutableStateOf(false) }
+        var scrubFraction by remember { mutableStateOf(0f) }
+        val shownFraction = if (scrubbing) {
+            scrubFraction
+        } else {
+            fractionOf(state.displayPositionMs, duration)
+        }
+        // M3 1.3 的 Slider **默认 knob 是竖条**（4dp 宽 × 44dp 高，Material 3 Expressive 的样式）。
+        // 用户要的是「细轨道 + 圆角 knob」，也就是经典 M3 的样子，所以把 thumb 换成
+        // `SliderDefaults.Thumb(thumbSize = 20dp × 20dp)` —— 它的形状是按尺寸画的胶囊，
+        // 长宽相等时正好是个圆（尺寸由 SliderState 自己摆放，不用我们算偏移）。
+        val sliderColors = SliderDefaults.colors(
+            thumbColor = MaterialTheme.colorScheme.primary,
+            activeTrackColor = MaterialTheme.colorScheme.primary,
+            inactiveTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+            disabledThumbColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            disabledActiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            disabledInactiveTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+        )
+        val sliderInteraction = remember { MutableInteractionSource() }
+        Slider(
+            value = shownFraction.coerceIn(0f, 1f),
+            onValueChange = { value ->
+                scrubbing = true
+                scrubFraction = value
+            },
+            onValueChangeFinished = {
+                scrubbing = false
+                player.seekToDisplay(positionOfFraction(scrubFraction, duration))
+            },
             enabled = known,
-            onSeek = { fraction -> player.seekToDisplay(positionOfFraction(fraction, duration)) },
+            colors = sliderColors,
+            interactionSource = sliderInteraction,
+            thumb = {
+                SliderDefaults.Thumb(
+                    interactionSource = sliderInteraction,
+                    colors = sliderColors,
+                    enabled = known,
+                    thumbSize = DpSize(20.dp, 20.dp),
+                )
+            },
             modifier = Modifier.fillMaxWidth(),
         )
         Row(

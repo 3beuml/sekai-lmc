@@ -24,6 +24,13 @@ import kotlin.math.sin
 /**
  * 波浪形进度条（对应留声器里那条 `SquigglyProgress`）。
  *
+ * ## ⚠️ 现在**没有界面用它**（0.1.36 起）
+ *
+ * 用户拍板把播放器换成 Google 原生的 Material 3 Slider，所以 `PlayerScreen` 里
+ * 这一处已经改成 `Slider` 了。**这个文件是故意留着的**，不是忘了删：
+ * 换回波浪条只需要把 `PlayerScreen` 里那个 `Slider(...)` 换回 `SquigglySeekBar(...)`，
+ * 交互语义（松手才 seek）两者是一致的，见下面「拖动策略」。
+ *
  * ## 为什么自己画
  *
  * 留声器那条是 **AOSP 衍生的自定义 `Drawable`**（`SeekBar` 的子类）。它那边是 View 体系，
@@ -35,6 +42,7 @@ import kotlin.math.sin
  * 拖动过程中只更新本地预览（并显示预览时间），**松手才真正 seek**。
  * 理由：音频是**流式**的，拖动时每帧都 seek 会让播放器不断丢弃缓冲区、
  * 重新发 Range 请求，表现是"拖的时候一直在卡"。松手一次到位最稳。
+ * （换成 M3 Slider 时这条语义**原样保留**了：`onValueChangeFinished` 里才 seek。）
  *
  * @param fraction 当前进度（0~1），由调用方从播放状态算好
  * @param onSeek [fraction] 松手/点击时回调（0~1）
