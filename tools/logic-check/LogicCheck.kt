@@ -149,6 +149,16 @@ import com.pjsk.toolbox.data.profile.filterMySongs
 import com.pjsk.toolbox.data.profile.myMusicQueryFromSaveText
 import com.pjsk.toolbox.data.profile.statusCounts
 import com.pjsk.toolbox.data.card.CardEpisode
+import com.pjsk.toolbox.data.profile.PlayerSnapshot
+import com.pjsk.toolbox.data.profile.OwnedCharacter
+import com.pjsk.toolbox.ui.common.intOrNull
+import com.pjsk.toolbox.data.deck.buildMasterDataPayload
+import com.pjsk.toolbox.data.deck.buildPowerParams
+import com.pjsk.toolbox.data.deck.buildUserJson
+import com.pjsk.toolbox.data.deck.restoreAreaItemLevelsJson
+import com.pjsk.toolbox.data.deck.restoreCardsJson
+import com.pjsk.toolbox.data.deck.restoreHonorsJson
+import com.pjsk.toolbox.data.deck.restoreMasterLessonsJson
 import com.pjsk.toolbox.data.profile.OwnedAreaItem
 import com.pjsk.toolbox.data.profile.OwnedHonor
 import com.pjsk.toolbox.data.profile.areaItemLevelKey
@@ -2566,7 +2576,7 @@ fun main(args: Array<String>) {
             val file = row.stringValue("file") ?: return@mapNotNull null
             Triple(file, row.intValue("rows") ?: 0, (row.stringValue("bytes")?.toLongOrNull() ?: 0L))
         }
-        check("清单里有 70 张表", entries.size == 70, "实际=${entries.size}")
+        check("清单里有 72 张表", entries.size == 72, "实际=${entries.size}")
 
         val sorted = entries.sortedWith(
             compareBy(
@@ -2591,7 +2601,7 @@ fun main(args: Array<String>) {
         val p2Bytes = p2.map { name -> entries.first { it.first == name }.third }
         check("P2 段按体积升序（小表先完成，进度条动得快）",
             p2Bytes.zipWithNext().all { (a, b) -> a <= b }, "体积序列前 8 项=${p2Bytes.take(8)}")
-        check("清单里 70 张表都排进去了", sorted.size == 70)
+        check("清单里 72 张表都排进去了", sorted.size == 72)
     }
 
     section("在线同步顺序：卡牌 / 歌曲在前，卡池垫底")
@@ -3694,6 +3704,121 @@ fun main(args: Array<String>) {
     )
 
     // ─────────────────────────────────────────────────────────
+    section("28. 组卡引擎的数据还原（批次 D）：裁剪形状 → 原始表形状")
+    // ─────────────────────────────────────────────────────────
+    // 引擎（allium-deck WASM）只吃原始 master data，而我们的快照是裁剪形状。
+    // 这一层是"机械映射"，但错一个字段名就会算出看起来合理的错结果，所以逐条断言。
+    val restoredCardRow = restoreCardsJson(
+        listOf(
+            """{"id":7,"assetbundleName":"res007","cardRarityType":"rarity_4","attr":"cool",
+               "characterId":3,"skillId":9,"supportUnit":"light_sound","trainBonus":[100,200,300],
+               "p1":[1000,1100],"p2":[2000,2100],"p3":[3000,3100]}""",
+        ),
+    )
+    val restoredCard = json.parseToJsonElement(restoredCardRow).jsonArray.first().jsonObject
+    val params = restoredCard["cardParameters"]!!.jsonArray
+    checkEq("★ cardParameters 条数 = 3 项 × 等级数", params.size, 6)
+    checkEq(
+        "★ 参数名与原始表一致（param1/param2/param3，不是 r/p）",
+        params.mapNotNull { (it as JsonObject).stringValue("cardParameterType") }.distinct().sorted(),
+        listOf("param1", "param2", "param3"),
+    )
+    checkEq("cardLevel 从 1 开始", (params.first() as JsonObject).stringValue("cardLevel")?.toIntOrNull(), 1)
+    checkEq("power 原样取回", (params.first() as JsonObject).stringValue("power")?.toIntOrNull(), 1000)
+    checkEq(
+        "★ 特训加成还原成 specialTrainingPowerNBonusFixed",
+        listOf(1, 2, 3).map { restoredCard.stringValue("specialTrainingPower${it}BonusFixed")?.toIntOrNull() },
+        listOf(100, 200, 300),
+    )
+    checkEq("支援团字段跟着还原", restoredCard.stringValue("supportUnit"), "light_sound")
+
+    val restoredAreaLevel = json.parseToJsonElement(
+        restoreAreaItemLevelsJson(
+            listOf(
+                """{"areaItemId":31,"level":3,"targetUnit":"light_sound","targetCardAttr":"any",
+                   "r":[0.5,0.5,0.5],"ar":[1.0,1.0,1.0]}""",
+            ),
+        ),
+    ).jsonArray.first().jsonObject
+    checkEq(
+        "★ 区域道具等级还原成六个 powerNBonusRate 字段",
+        listOf(1, 2, 3).map { restoredAreaLevel.stringValue("power${it}BonusRate") },
+        listOf("0.5", "0.5", "0.5"),
+    )
+    checkEq("整队同组加成率也还原", restoredAreaLevel.stringValue("power1AllMatchBonusRate"), "1.0")
+    checkEq(
+        "★ targetGameCharacterId 缺省时**不写这个字段**（写 0 会被当成 0 号角色）",
+        restoredAreaLevel.containsKey("targetGameCharacterId"),
+        false,
+    )
+    checkEq(
+        "masterLessons 还原成 powerNBonusFixed",
+        json.parseToJsonElement(
+            restoreMasterLessonsJson(listOf("""{"cardRarityType":"rarity_4","masterRank":2,"b":[200,200,200]}""")),
+        ).jsonArray.first().jsonObject.stringValue("power3BonusFixed"),
+        "200.0",
+    )
+    checkEq(
+        "称号还原时每级补回 honorId",
+        (json.parseToJsonElement(
+            restoreHonorsJson(listOf("""{"id":105,"name":"39！","levels":[{"level":1,"bonus":10}]}""")),
+        ).jsonArray.first().jsonObject["levels"]!!.jsonArray.first() as JsonObject).intOrNull("honorId"),
+        105,
+    )
+    checkEq(
+        "★ masterdata payload 的值必须是**字符串**（转义后的表原文）",
+        buildMasterDataPayload(mapOf("cards" to """[{"id":1}]""")).let { json.parseToJsonElement(it).jsonObject },
+        json.parseToJsonElement("""{"cards":"[{\"id\":1}]"}""").jsonObject,
+    )
+    check("★ 转义覆盖引号/反斜杠/换行", run {
+        val tricky = "a\"b\\c\nd"
+        val payload = buildMasterDataPayload(mapOf("t" to tricky))
+        json.parseToJsonElement(payload).jsonObject.stringValue("t") == tricky
+    })
+    checkEq(
+        "params 是 target=power + 无活动（完全离线）",
+        json.parseToJsonElement(buildPowerParams(limit = 5)).jsonObject.let {
+            listOf(it.stringValue("target"), it.stringValue("limit")?.toIntOrNull(), it.containsKey("event_id"))
+        },
+        listOf("power", 5, false),
+    )
+    checkEq("limit 超过 30 会被夹住（引擎上限）", json.parseToJsonElement(buildPowerParams(limit = 99)).jsonObject.stringValue("limit")?.toIntOrNull(), 30)
+
+    val engineUserJson = json.parseToJsonElement(
+        buildUserJson(
+            PlayerSnapshot(
+                account = PlayerAccount("jp", "123456789012345678"),
+                uploadTime = 0, name = "测试", rank = 100, coin = 0, totalExp = 0,
+                signature = "", profileImageType = "", deckLeaderCardId = 1,
+                cards = listOf(
+                    OwnedCard(1, 60, 2, 3, trained = true, episodesRead = 1, readEpisodeKeys = setOf(9001)),
+                ),
+                musicResults = emptyList(),
+                materials = emptyList(),
+                characters = listOf(OwnedCharacter(3, 42)),
+                bonds = emptyList(),
+                challengeStages = emptyList(),
+                areaItems = listOf(OwnedAreaItem(31, 10)),
+                honors = listOf(OwnedHonor(105, 1)),
+            ),
+        ),
+    ).jsonObject
+    checkEq(
+        "★ userCards 的 episodes 写成引擎认的形状（scenarioStatus=already_read）",
+        ((engineUserJson["userCards"]!!.jsonArray.first() as JsonObject)["episodes"]!!.jsonArray.first() as JsonObject)
+            .stringValue("scenarioStatus"),
+        "already_read",
+    )
+    checkEq(
+        "userAreas 把每件道具包进一个区域对象",
+        ((engineUserJson["userAreas"]!!.jsonArray.first() as JsonObject)["areaItems"]!!.jsonArray.first() as JsonObject)
+            .stringValue("level")?.toIntOrNull(),
+        10,
+    )
+    checkEq("userCharacters 带角色等级", (engineUserJson["userCharacters"]!!.jsonArray.first() as JsonObject).stringValue("characterRank")?.toIntOrNull(), 42)
+    checkEq("userHonors 带称号等级", (engineUserJson["userHonors"]!!.jsonArray.first() as JsonObject).stringValue("level")?.toIntOrNull(), 1)
+
+    // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))
     if (failures == 0) {
         println("逻辑自检 PASS —— $checks 项全部通过")
@@ -3723,6 +3848,11 @@ private fun JsonObject.boolValue(key: String): Boolean? =
 private fun JsonObject.intList(key: String): List<Int> =
     (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.content?.toDoubleOrNull()?.toInt() }
         ?: emptyList()
+
+
+
+
+
 
 
 
