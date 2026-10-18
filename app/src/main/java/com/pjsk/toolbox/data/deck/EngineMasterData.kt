@@ -280,6 +280,7 @@ private inline fun joinObjects(rows: List<String>, crossinline mapper: (JsonObje
     for (raw in rows) {
         val obj = raw.parseJsonObjectOrNull() ?: continue
         val mapped = mapper(obj) ?: continue
+        if (!first) sb.append(',')
         first = false
         sb.append(mapped.toString())
     }
