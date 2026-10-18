@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>deck engine</title>
+  <style>
+    body { font: 13px/1.45 monospace; margin: 10px; color: #ddd; background: #121212; }
+    #log { white-space: pre-wrap; word-break: break-all; }
+  </style>
+</head>
+<body>
+<div id="log">booting…</div>
+<script type="module">
+  import init, { load_masterdata, recommend } from "/allium_deck.js";
+
+  const log = (text) => {
+    const el = document.getElementById("log");
+    if (el) el.textContent = text;
+  };
+
+  // 宿主（Kotlin）注入的对象叫 DeckBridge。任何一步失败都**原样**把错误文本回传，
+  // 不做任何"友好化"—— 排查靠的就是引擎原始的报错。
+  const post = (kind, payload) => {
+    try { window.DeckBridge.post(kind, String(payload)); }
+    catch (e) { log("bridge missing: " + e); }
+  };
+
+  window.addEventListener("error", (e) => post("error", "window.error: " + e.message));
+  window.addEventListener("unhandledrejection", (e) => post("error", "unhandled: " + (e.reason && e.reason.message ? e.reason.message : e.reason)));
+
+  window.deckBoot = {
+    // 载入 masterdata：masterJson 是 {"cards":"<表原文>", …} 的字符串
+    load: (masterJson) => {
+      try {
+        load_masterdata(masterJson, "");
+        post("loaded", "ok");
+        return "ok";
+      } catch (e) {
+        post("error", "load_masterdata: " + (e && e.message ? e.message : e));
+        return "error";
+      }
+    },
+    // 组卡：userJson / paramsJson 都是字符串
+    run: (userJson, paramsJson) => {
+      const started = Date.now();
+      try {
+        const out = recommend(userJson, paramsJson);
+        post("result", out);
+        post("elapsed", String(Date.now() - started));
+        return "ok";
+      } catch (e) {
+        post("error", "recommend: " + (e && e.message ? e.message : e));
+        return "error";
+      }
+    },
+  };
+
+  try {
+    await init();
+    log("wasm ready");
+    post("ready", "ok");
+  } catch (e) {
+    post("error", "init: " + (e && e.message ? e.message : e));
+  }
+</script>
+</body>
+</html>

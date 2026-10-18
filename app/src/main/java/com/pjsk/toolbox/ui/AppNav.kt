@@ -39,6 +39,7 @@ import com.pjsk.toolbox.PjskApp
 import com.pjsk.toolbox.data.story.StoryType
 import com.pjsk.toolbox.ui.screen.AboutScreen
 import com.pjsk.toolbox.ui.screen.Best30Screen
+import com.pjsk.toolbox.ui.screen.DeckRecommendScreen
 import com.pjsk.toolbox.ui.screen.DeckScreen
 import com.pjsk.toolbox.ui.screen.BindAccountScreen
 import com.pjsk.toolbox.ui.screen.CardDetailScreen
@@ -116,6 +117,9 @@ object Routes {
      * 加这一屏的直接原因：用户反馈「综合力只能看到 5 张卡，看不到是哪几张」。
      */
     const val MY_DECKS = "my/decks"
+
+    /** 组卡推荐（批次 D 冒烟）：验证 WASM 引擎能不能跑。 */
+    const val MY_DECK_RECOMMEND = "my/deck-recommend"
 
     const val ARG_TABLE = "table"
     const val ARG_ID = "id"
@@ -401,6 +405,7 @@ fun AppNav() {
                     onOpenMyMusic = { navController.navigate(Routes.MY_MUSIC) },
                     onOpenBest30 = { navController.navigate(Routes.MY_BEST30) },
                     onOpenMyDecks = { navController.navigate(Routes.MY_DECKS) },
+                    onOpenDeckRecommend = { navController.navigate(Routes.MY_DECK_RECOMMEND) },
                 )
             }
 
@@ -470,8 +475,17 @@ fun AppNav() {
                     onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
                     onOpenMyPlayer = { navController.navigate(Routes.MY_PLAYER) },
                     onOpenCard = { cardId -> navController.navigate(Routes.cardDetail(cardId)) },
+                    onOpenRecommend = { navController.navigate(Routes.MY_DECK_RECOMMEND) },
                 )
             }
+
+            composable(Routes.MY_DECK_RECOMMEND) {
+                DeckRecommendScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenBind = { navController.navigate(Routes.BIND_ACCOUNT) },
+                )
+            }
+
             composable(Routes.BIND_ACCOUNT) {
                 BindAccountScreen(
                     onBack = { navController.popBackStack() },
@@ -790,4 +804,7 @@ fun AppNav() {
         }
     }
 }
+
+
+
 

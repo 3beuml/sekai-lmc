@@ -1,4 +1,4 @@
-package com.pjsk.toolbox.ui.screen
+﻿package com.pjsk.toolbox.ui.screen
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -142,6 +142,8 @@ fun MyPlayerScreen(
     onOpenBest30: () -> Unit,
     /** 「编成」页：逐套摊开看 5 张卡 + 各自的综合力。 */
     onOpenMyDecks: () -> Unit,
+    /** 组卡推荐（批次 D 冒烟）。 */
+    onOpenDeckRecommend: () -> Unit,
 ) {
     val context = LocalContext.current
     val container = (context.applicationContext as PjskApp).container
@@ -1264,6 +1266,7 @@ private fun serverLabel(server: String): String = when (server) {
     "en" -> "国际服"
     else -> server
 }
+
 
 
 
