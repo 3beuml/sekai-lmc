@@ -41,9 +41,8 @@ import androidx.compose.material.icons.outlined.Alarm
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -51,7 +50,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -69,7 +67,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -115,7 +112,6 @@ import com.pjsk.toolbox.data.player.sleepTimerRemainingMs
 import com.pjsk.toolbox.data.remote.AssetUrls
 import com.pjsk.toolbox.data.remote.ServerRegion
 import com.pjsk.toolbox.data.palette.PlayerPalette
-import com.pjsk.toolbox.data.palette.averageLightness
 import com.pjsk.toolbox.data.palette.pickArtworkSeed
 import com.pjsk.toolbox.data.palette.playerPaletteFromPixels
 import com.pjsk.toolbox.ui.theme.resolveDark
@@ -305,7 +301,6 @@ fun PlayerScreen(
             // 先把上一张的颜色摘掉，避免"这张还没算完、却在用上张颜色"的错觉
             coverPalette = null
             var pixelInfo = "no-bitmap"
-            var meanLightness = 0f
             val extracted = withContext(Dispatchers.IO) {
                 runCatching {
                     // ⚠️ 两个参数都是必须的：
@@ -330,7 +325,6 @@ fun PlayerScreen(
                     bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
                     // 严格档 / 宽松档分别成没成，是排查"这张封面到底取没取到色"的关键信息
                     val strict = pickArtworkSeed(pixels) != null
-                    meanLightness = averageLightness(pixels)
                     pixelInfo = "${w}x$h " + if (strict) "strict" else "loose-or-none"
                     playerPaletteFromPixels(pixels)
                 }.onFailure {
@@ -345,11 +339,10 @@ fun PlayerScreen(
             // 诊断日志：取色是"算错也不报错"的那类逻辑，出问题只能靠这行看
             // （`adb logcat -d -s PlayerPalette:I`）。
             // px=load-fail:xxx 表示图没加载成功；seed=none 表示有图但挑不出种子色 →
-            // 两种都回落 App 当前主题的方案。
+            // 两种都回落 App 主题的浅色方案。
             android.util.Log.i(
                 "PlayerPalette",
-                "cover=$id px=$pixelInfo L=${"%.2f".format(meanLightness)} " +
-                    "mode=${extracted?.let { if (it.isLight) "light" else "dark" } ?: "fallback"} " +
+                "cover=$id px=$pixelInfo " +
                     "seed=${extracted?.seed?.let { "#%06X".format(it and 0xFFFFFF) } ?: "none"} " +
                     "accent=${extracted?.accent?.let { "#%06X".format(it and 0xFFFFFF) } ?: "default"} " +
                     "top=${extracted?.gradientTop?.let { "#%06X".format(it and 0xFFFFFF) } ?: "default"}",
@@ -360,12 +353,11 @@ fun PlayerScreen(
 
     // 颜色切换用**渐变**而不是硬切：硬切会让整屏"啪"一下换色，很廉价。
     //
-    // 取不到封面时回落 **App 当前主题**的方案（读外层主题的底色亮度决定浅/深），
-    // 而不是硬编一个 —— 播放器现在不强行深色了，回退也该跟着 App 走。
-    val appIsDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val fallbackScheme = if (appIsDark) darkColorScheme() else lightColorScheme()
-    // 浅色/深色两套方案在派生上只差 tone 表，Compose 侧只是换了"基准方案"。
-    // 动画要横跨两套方案也能插值，所以 animateColorAsState 用的还是 Color，不是 ColorScheme。
+    // 0.1.45 用户拍板：**播放器恒定浅色**（不再按封面亮度切深色），
+    // 回退（取不到封面时）也固定用浅色 —— 明暗与封面无关，这是 Gramophone 的结构
+    // （seed → 一套 M3 scheme；只是它跟系统明暗，这里恒浅）。
+    val baseScheme = lightColorScheme()
+    // 动画要能插值，所以 animateColorAsState 用的还是 Color，不是 ColorScheme。
     val animSpec = tween<Color>(durationMillis = 450)
     @Composable
     fun animArgb(argb: Int?, fallback: Color): Color =
@@ -374,17 +366,12 @@ fun PlayerScreen(
     // **整份** ColorScheme 派生：一个角色都不留给原主题。
     // 之前只换 7 个角色，剩下的 secondary/tertiary/outline 还是初音绿和粉 →
     // 红封面配绿次色，就是"只有部分封面好看"的主因。
-    //
-    // ⚠️ 这里刻意**不**用 `coverPalette.isLight` 去切两套 Material 基色：
-    // 封面在手时 25 个角色**全部**来自调色板，只有取不到封面时才用 fallback；
-    // 包一层 if 反而会引入"基色里漏出来的角色"（正是 0.1.40 之前的老毛病）。
-    val baseScheme = fallbackScheme
     val playerColors = baseScheme.copy(
         primary = animArgb(coverPalette?.accent, baseScheme.primary),
         onPrimary = animArgb(coverPalette?.onAccent, baseScheme.onPrimary),
-        // 播放/暂停的实心圆：两套方案里都是"较深的那一档"（用户 0.1.43 拍板）
-        primaryContainer = animArgb(coverPalette?.controlFill, baseScheme.primaryContainer),
-        onPrimaryContainer = animArgb(coverPalette?.onControlFill, baseScheme.onPrimaryContainer),
+        // 浅 tonal 选中态底（0.1.45 起播放/暂停键也用它，Gramophone 的 secondaryContainer 玩法）
+        primaryContainer = animArgb(coverPalette?.accentContainer, baseScheme.primaryContainer),
+        onPrimaryContainer = animArgb(coverPalette?.onAccentContainer, baseScheme.onPrimaryContainer),
         // secondary 是"低饱和的同族色"：底上要能读，但不抢主色
         secondary = animArgb(coverPalette?.onSurfaceVariant, baseScheme.secondary),
         onSecondary = animArgb(coverPalette?.surfaceContainer, baseScheme.onSecondary),
@@ -409,10 +396,10 @@ fun PlayerScreen(
         outline = animArgb(coverPalette?.outline, baseScheme.outline),
         outlineVariant = animArgb(coverPalette?.outlineVariant, baseScheme.outlineVariant),
     )
+    val fadedTrack = animArgb(coverPalette?.fadedTrack, baseScheme.surfaceVariant)
 
-    // 系统栏图标跟着**最终底色的亮度**走：浅底要深图标，深底要浅图标。
-    // 放在这里而不是函数开头，是因为这一刻才知道底色是浅是深（封面可能还没算完）。
-    SystemBarIconAppearance(lightBackground = playerColors.background.luminance() >= 0.5f)
+    // 播放器恒浅色 → 系统栏图标永远是深色（浅底要深图标才看得见）
+    SystemBarIconAppearance(lightBackground = true)
 
     val vocals = detail?.vocals.orEmpty()
     val index = vocals.indexOfFirst { it.id == track.vocalId }
@@ -693,6 +680,8 @@ fun PlayerScreen(
             fraction = fractionOf(state.displayPositionMs, duration),
             enabled = known,
             onSeek = { fraction -> player.seekToDisplay(positionOfFraction(fraction, duration)) },
+            // 未播轨道照 Gramophone 的 COLOR_CONTRAST_FAINTED：同色相的淡色，不再用中性灰
+            trackColor = fadedTrack,
             modifier = Modifier.fillMaxWidth(),
         )
         Row(
@@ -733,8 +722,8 @@ fun PlayerScreen(
             // "换版本"由下面那个「版本」钮负责。
             //
             // 0.1.43：这两个键的图标也走封面主色（用户要求"上一首下一首也要适配"）。
-            // 浅色方案下 primary 就是"封面色里较深的那一档"，正好是用户说的效果；
-            // 深色方案下 primary 是亮档 —— 深底上再压深色就看不见了，这才是同一语义。
+            // 浅色方案下 primary 就是"封面色里较深的那一档"，正好是用户说的效果。
+            // （与 Gramophone 有意保留的差异：它这里是中性 colorOnSurface —— 要对齐就一行。）
             IconButton(onClick = { player.previous() }, enabled = state.hasQueue) {
                 Icon(
                     imageVector = Icons.Default.SkipPrevious,
@@ -744,17 +733,14 @@ fun PlayerScreen(
                 )
             }
             Spacer(Modifier.width(24.dp))
-            FilledIconButton(
+            FilledTonalIconButton(
                 onClick = { player.togglePlayPause() },
                 // 90dp 照留声器的 sheet_mid_button
                 modifier = Modifier.size(90.dp),
-                // **显式**指定颜色，不吃 FilledIconButton 的默认值：
-                // 默认是 primary/onPrimary，而 0.1.43 要的是"深色实心圆 + 亮图标"，
-                // 也就是调色板里的 controlFill（浅色方案 = 深饱和色，深色方案 = 深容器色）。
-                colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                ),
+                // 0.1.45 用户拍板：改成 **Gramophone 式浅 tonal 圆** ——
+                // `FilledTonalIconButton` 的默认色就是 M3 的 secondaryContainer/onSecondaryContainer，
+                // 而这两个角色已经被映射到调色板的 accentContainer/onAccentContainer（同种子色相），
+                // 所以这里不需要任何显式颜色。
             ) {
                 Icon(
                     imageVector = if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,

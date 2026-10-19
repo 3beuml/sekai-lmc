@@ -9,28 +9,32 @@ import kotlin.math.sqrt
 /**
  * 封面取色：从封面里抽一个**种子色**，再派生出播放器的一整份调色板。
  *
- * ## 0.1.43 → 0.1.44 的转向：派生单位从"种子饱和度"改成**目标色度**
+ * ## 0.1.45 的转向：**恒定浅色**，明暗与封面无关（用户拍板）
  *
- * 0.1.43 的做法是 `背景饱和度 = 种子饱和度 × 系数`。亮橙/亮黄封面种子饱和度常在 0.8~1.0，
- * 乘完背景就是 0.27~0.45 饱和的暗橙 —— 用户原话："较亮的颜色如橙色被用到黑夜模式里"。
+ * 0.1.43 曾做"封面平均亮度 ≥0.58 切深色"，0.1.44 把深色表调成近中性 —— 用户两版都不满意：
+ * "不喜欢深色模式，好几个封面配合的都是深色模式"。0.1.45 推翻：**删除整条深色路径，
+ * 播放器永远是浅色**；种子只提供色相，无论封面多暗。这正是 Gramophone 的结构
+ * （`FullBottomSheet.addColorScheme()` 用 `DynamicColorsOptions.setContentBasedSource(bitmap)`
+ * 给每首歌生成 M3 scheme，明暗跟主题；只是我们这里恒浅）。
  *
- * 0.1.44 起（用户拍板）：**每个角色给一个目标色度 c（RGB 上 (max-min)/255），从种子只拿色相**。
- * 这是 Material You 的标准做法：
- *  1. 表面**近乎中性**，只带一丝封面色相（深色 c 0.03~0.065，浅色 c 0.06~0.08）；
- *  2. 彩色集中在强调色上（c 极值有限值，约 0.10~0.17）；
- *  3. **暖色（15°~75°，即橙/黄/黄绿）的色度再压 0.78 倍** —— HSL 里同样 c 暖色看起来更热，
- *     不压的话亮橙仍然是"荧光橙"。红/洋红（330°~15°）压 0.9 倍。
+ * 相应地，播放键也从"深色实心圆"改成 **Gramophone 式浅 tonal 圆**
+ * （UI 侧用 `FilledTonalIconButton`，吃 `secondaryContainer` 角色）。
  *
- * ## 语义不变的部分
+ * ## 派生单位是"目标色度"（0.1.44 引入，保留）
  *
- *  - **明暗自适应**（0.1.43）：封面平均亮度 ≥ [LIGHT_COVER_THRESHOLD] 走浅色，否则深色；
- *  - **取色宽严两档兜底**（0.1.42）：连宽松档都挑不出种子 → 返回 null，调用方回落 App 当前主题；
- *  - **对比度兜底**（ensureContrast）：算完结果再"推一把"，保证深底亮字。
+ * 每个角色给**目标色度 c（RGB 上 (max-min)/255）+ 明度 L**，种子只提供色相，
+ * 饱和度由 `saturationForChroma(c, L)` 反解。这样：
+ *  - 底色可以精确停在"看得出色相但不脏"的窄带里；
+ *  - **暖色（15°~75°，橙/黄/黄绿）的色度压 0.78 倍**、红/洋红压 0.9 倍 —— 处理 HSL 对暖色偏热的问题；
+ *  - 以后调"脏不脏"只改表一个数。
+ *
+ * ## 兜底链（0.1.42，保留）
+ *
+ * 严格档挑不出种子 → 宽松档；都挑不出 → 返回 null，调用方回落 App 主题。
  *
  * ## 这一层是纯函数
  *
- * 只处理 ARGB Int，不碰 Android/Compose，所以能进 `tools/logic-check` 断言：
- * 颜色算错会变成红灯，而不是"看着有点怪"。
+ * 只处理 ARGB Int，不碰 Android/Compose，所以能进 `tools/logic-check` 断言。
  */
 
 /** 从封面里选出的种子。`hue` 0..360，`saturation`/`lightness` 0..1，`share` 是它占的像素比例。 */
@@ -42,28 +46,27 @@ data class ArtworkSeed(
 )
 
 /**
- * 播放器调色板。浅色/深色两套**共用这一份字段**，用 [isLight] 区分。
+ * 播放器**浅色**调色板（0.1.45 起没有深色版）。
  *
- * ## 每个角色的落点
+ * ## 角色落点（对照 Gramophone 的 `applyColorScheme()`）
  *
- * - [accent]：进度条已播段、曲名、上一首/下一首图标、定时器文字（"同色系的强调档"）
- * - [controlFill] / [onControlFill]：播放/暂停的**实心圆**。
- *   注意它两套方案里都是"较深的那一档"（用户 0.1.43 原话：暂停键用封面提取色里较深的配色）。
- * - [accentContainer] / [onAccentContainer]：选中态底（队列当前行、chip）
- * - [gradientTop] / [gradientBottom]：整屏竖向渐变的两端（**近乎中性**，只带一丝种子色相）
- * - [surfaceLow]…[surfaceHighest]：容器阶（M3 里"数字越大越靠上层"）
- * - [onSurface] / [onSurfaceVariant]：正文 / 次要文字
- * - [fadedTrack]：未播轨道
+ * - [accent]：进度条已播段、曲名、上一首/下一首图标（Gramophone 在这些位放 `colorPrimary`；
+ *   唯一差异：Gramophone 的上一首/下一首是中性 `colorOnSurface`，我们按用户要求保留封面色）
+ * - [onAccent]：压在 [accent] 上的前景（时间高亮、chip）
+ * - [accentContainer] / [onAccentContainer]：**播放/暂停的浅 tonal 圆** +
+ *   选中态底 —— Gramophone 的播放键就是 `colorSecondaryContainer`
+ * - [gradientTop] / [gradientBottom]：整屏竖向渐变（**近中性**，只带一丝色相）
+ * - [surfaceLow]…[surfaceHighest]：容器阶（M3"数字越大越靠上层"）
+ * - [onSurface] / [onSurfaceVariant]：正文 / 次要文字（中性，不发脏）
+ * - [outline]：分隔/描边；[outlineVariant]：极淡的描边色
+ * - [fadedTrack]：**未播轨道**（Gramophone 的 `COLOR_CONTRAST_FAINTED`：
+ *   secondaryContainer 的 chroma ×0.7、lighting ×0.97 —— 这里用同一条种子色相算出来的淡色）
  */
 data class PlayerPalette(
     /** 种子色本身（诊断用，不直接画东西）。 */
     val seed: Int,
-    /** true = 浅色方案（封面偏亮），false = 深色方案（封面偏暗）。 */
-    val isLight: Boolean,
     val accent: Int,
     val onAccent: Int,
-    val controlFill: Int,
-    val onControlFill: Int,
     val accentContainer: Int,
     val onAccentContainer: Int,
     val gradientTop: Int,
@@ -91,148 +94,65 @@ private const val LOOSE_MIN_SHARE = 0.004f
 private const val LOOSE_MIN_LIGHTNESS = 0.05f
 private const val LOOSE_MAX_LIGHTNESS = 0.95f
 
-/**
- * 判浅色的门槛：封面**平均 HSL 亮度** ≥ 这个值就走浅色方案。
- *
- * 0.58 是"偏亮"而不是"过半"：浅色方案对暗封面很不宽容（见文件头），
- * 宁可多判几首走深色，也不要出现灰紫底。0.1.44 按用户拍板**没动**。
- */
-const val LIGHT_COVER_THRESHOLD = 0.58f
-
 /** 强调色的目标色度区间：下限保证"有封面感"，上限治"荧光橙"。 */
 private const val ACCENT_CHROMA_MIN = 0.09f
 private const val ACCENT_CHROMA_MAX = 0.17f
 
-// ── 深色方案的 tone 表（0.1.44：每行 = 明度 + 目标色度）──
-// 色度一格一格往低走是有意的：**表面必须近乎中性**，彩色只留给强调色。
-private const val D_GRADIENT_TOP_L = 0.18f
-private const val D_GRADIENT_TOP_C = 0.055f
-private const val D_GRADIENT_BOTTOM_L = 0.07f
-private const val D_GRADIENT_BOTTOM_C = 0.028f
-private const val D_SURFACE_LOW_L = 0.11f
-private const val D_SURFACE_LOW_C = 0.050f
-private const val D_SURFACE_L = 0.14f
-private const val D_SURFACE_C = 0.055f
-private const val D_SURFACE_HIGH_L = 0.18f
-private const val D_SURFACE_HIGH_C = 0.060f
-private const val D_SURFACE_HIGHEST_L = 0.22f
-private const val D_SURFACE_HIGHEST_C = 0.065f
-private const val D_ACCENT_L = 0.78f
-private const val D_ON_ACCENT_L = 0.16f
-private const val D_CONTROL_L = 0.26f
-private const val D_CONTROL_C = 0.090f
-private const val D_ON_CONTROL_L = 0.88f
-private const val D_ACCENT_CONTAINER_L = 0.30f
-private const val D_ACCENT_CONTAINER_C = 0.090f
-private const val D_ON_ACCENT_CONTAINER_L = 0.90f
-private const val D_ON_SURFACE_L = 0.95f
-private const val D_ON_SURFACE_VARIANT_L = 0.78f
-private const val D_OUTLINE_L = 0.55f
-private const val D_OUTLINE_VARIANT_L = 0.28f
-private const val D_FADED_L = 0.45f
+// ── 浅色方案 tone 表（0.1.45：恒浅色，每行 = 明度 + 目标色度）──
+private const val GRADIENT_TOP_L = 0.955f
+private const val GRADIENT_TOP_C = 0.035f
+private const val GRADIENT_BOTTOM_L = 0.905f
+private const val GRADIENT_BOTTOM_C = 0.075f
+private const val SURFACE_LOW_L = 0.945f
+private const val SURFACE_LOW_C = 0.060f
+private const val SURFACE_L = 0.925f
+private const val SURFACE_C = 0.070f
+private const val SURFACE_HIGH_L = 0.895f
+private const val SURFACE_HIGH_C = 0.075f
+private const val SURFACE_HIGHEST_L = 0.855f
+private const val SURFACE_HIGHEST_C = 0.080f
+private const val ACCENT_L = 0.34f
+private const val ON_ACCENT_L = 0.99f
+private const val ACCENT_CONTAINER_L = 0.88f
+private const val ACCENT_CONTAINER_C = 0.070f
+private const val ON_ACCENT_CONTAINER_L = 0.16f
+private const val ON_SURFACE_L = 0.15f
+private const val ON_SURFACE_VARIANT_L = 0.40f
+private const val OUTLINE_L = 0.52f
+private const val OUTLINE_VARIANT_L = 0.80f
+private const val FADED_TRACK_L = 0.85f
 
-private fun darkPalette(seed: ArtworkSeed): PlayerPalette {
+private fun palette(seed: ArtworkSeed): PlayerPalette {
     val h = seed.hue
-    // 强调色的"封面感"随种子饱和度走：低饱和封面 → 收敛，艳封面 → 放开一点，但都封顶
     val accentC = (ACCENT_CHROMA_MIN + 0.08f * seed.saturation).coerceIn(ACCENT_CHROMA_MIN, ACCENT_CHROMA_MAX)
 
-    val gradientTop = tone(D_GRADIENT_TOP_L, D_GRADIENT_TOP_C, h)
-    val gradientBottom = tone(D_GRADIENT_BOTTOM_L, D_GRADIENT_BOTTOM_C, h)
-    val surfaceContainer = tone(D_SURFACE_L, D_SURFACE_C, h)
-    val surfaceHighest = tone(D_SURFACE_HIGHEST_L, D_SURFACE_HIGHEST_C, h)
-    val accent = ensureContrast(tone(D_ACCENT_L, accentC, h), gradientBottom, 4.5)
-    val controlFill = tone(D_CONTROL_L, D_CONTROL_C, h)
-    val accentContainer = tone(D_ACCENT_CONTAINER_L, D_ACCENT_CONTAINER_C, h)
+    val gradientTop = tone(GRADIENT_TOP_L, GRADIENT_TOP_C, h)
+    val gradientBottom = tone(GRADIENT_BOTTOM_L, GRADIENT_BOTTOM_C, h)
+    val surfaceContainer = tone(SURFACE_L, SURFACE_C, h)
+    val accentContainer = tone(ACCENT_CONTAINER_L, ACCENT_CONTAINER_C, h)
+    val accent = ensureContrast(tone(ACCENT_L, accentC, h), gradientBottom, 4.5)
+
+    // 未播轨道 = 照 Gramophone 的 COLOR_CONTRAST_FAINTED：accentContainer 的 chroma×0.7、lighting×0.97
+    val fadedChroma = ACCENT_CONTAINER_C * 0.7f
+    val fadedLightness = ACCENT_CONTAINER_L * 0.97f
 
     return PlayerPalette(
         seed = hslToArgb(h, seed.saturation, seed.lightness),
-        isLight = false,
         accent = accent,
-        // 图标/文字压在亮强调色上：明度差 + hue-neutral 就够对比了
-        onAccent = ensureContrast(tone(D_ON_ACCENT_L, 0.02f, h), accent, 4.5),
-        controlFill = controlFill,
-        onControlFill = ensureContrast(tone(D_ON_CONTROL_L, 0.02f, h), controlFill, 4.5),
+        onAccent = ensureContrast(tone(ON_ACCENT_L, 0.005f, h), accent, 4.5),
         accentContainer = accentContainer,
-        onAccentContainer = ensureContrast(tone(D_ON_ACCENT_CONTAINER_L, 0.02f, h), accentContainer, 4.5),
+        onAccentContainer = ensureContrast(tone(ON_ACCENT_CONTAINER_L, 0.02f, h), accentContainer, 4.5),
         gradientTop = gradientTop,
         gradientBottom = gradientBottom,
-        surfaceLow = tone(D_SURFACE_LOW_L, D_SURFACE_LOW_C, h),
+        surfaceLow = tone(SURFACE_LOW_L, SURFACE_LOW_C, h),
         surfaceContainer = surfaceContainer,
-        surfaceHigh = tone(D_SURFACE_HIGH_L, D_SURFACE_HIGH_C, h),
-        surfaceHighest = surfaceHighest,
-        onSurface = ensureContrast(tone(D_ON_SURFACE_L, 0.010f, h), surfaceContainer, 4.5),
-        onSurfaceVariant = ensureContrast(tone(D_ON_SURFACE_VARIANT_L, 0.025f, h), surfaceContainer, 4.0),
-        outline = tone(D_OUTLINE_L, 0.03f, h),
-        outlineVariant = tone(D_OUTLINE_VARIANT_L, 0.035f, h),
-        fadedTrack = tone(D_FADED_L, 0.04f, h),
-    )
-}
-
-// ── 浅色方案的 tone 表（0.1.44）──
-//
-// ⚠️ 历史坑（0.1.43 第一版翻的）：**HSL 的高亮度会把饱和度压没**。
-// 当时用 L=0.975，色度需求全靠 s 硬顶，算出来 #F8F8F9 等于纯白。
-// 现在 L 卡在 0.855~0.955 区间，用 [tone] 按目标色度**反解** s，色度够才看得出。
-private const val L_GRADIENT_TOP_L = 0.955f
-private const val L_GRADIENT_TOP_C = 0.035f
-private const val L_GRADIENT_BOTTOM_L = 0.905f
-private const val L_GRADIENT_BOTTOM_C = 0.075f
-private const val L_SURFACE_LOW_L = 0.945f
-private const val L_SURFACE_LOW_C = 0.060f
-private const val L_SURFACE_L = 0.925f
-private const val L_SURFACE_C = 0.070f
-private const val L_SURFACE_HIGH_L = 0.895f
-private const val L_SURFACE_HIGH_C = 0.075f
-private const val L_SURFACE_HIGHEST_L = 0.855f
-private const val L_SURFACE_HIGHEST_C = 0.080f
-private const val L_ACCENT_L = 0.34f
-private const val L_ON_ACCENT_L = 0.99f
-private const val L_CONTROL_L = 0.30f
-private const val L_CONTROL_C_MIN = 0.12f
-private const val L_CONTROL_C_MAX = 0.20f
-private const val L_ON_CONTROL_L = 0.97f
-private const val L_ACCENT_CONTAINER_L = 0.88f
-private const val L_ACCENT_CONTAINER_C = 0.070f
-private const val L_ON_ACCENT_CONTAINER_L = 0.16f
-private const val L_ON_SURFACE_L = 0.15f
-private const val L_ON_SURFACE_VARIANT_L = 0.40f
-private const val L_OUTLINE_L = 0.52f
-private const val L_OUTLINE_VARIANT_L = 0.80f
-private const val L_FADED_L = 0.70f
-
-private fun lightPalette(seed: ArtworkSeed): PlayerPalette {
-    val h = seed.hue
-    val accentC = (ACCENT_CHROMA_MIN + 0.08f * seed.saturation).coerceIn(ACCENT_CHROMA_MIN, ACCENT_CHROMA_MAX)
-    // 播放键是"较深的封面色"（用户拍板），色度给到强调色之上，视觉重量才够
-    val controlC = (L_CONTROL_C_MIN + 0.08f * seed.saturation).coerceIn(L_CONTROL_C_MIN, L_CONTROL_C_MAX)
-
-    val gradientTop = tone(L_GRADIENT_TOP_L, L_GRADIENT_TOP_C, h)
-    val gradientBottom = tone(L_GRADIENT_BOTTOM_L, L_GRADIENT_BOTTOM_C, h)
-    val surfaceContainer = tone(L_SURFACE_L, L_SURFACE_C, h)
-    val accent = ensureContrast(tone(L_ACCENT_L, accentC, h), gradientBottom, 4.5)
-    val controlFill = ensureContrast(tone(L_CONTROL_L, controlC, h), gradientTop, 4.5)
-    val accentContainer = tone(L_ACCENT_CONTAINER_L, L_ACCENT_CONTAINER_C, h)
-
-    return PlayerPalette(
-        seed = hslToArgb(h, seed.saturation, seed.lightness),
-        isLight = true,
-        accent = accent,
-        onAccent = ensureContrast(tone(L_ON_ACCENT_L, 0.005f, h), accent, 4.5),
-        controlFill = controlFill,
-        onControlFill = ensureContrast(tone(L_ON_CONTROL_L, 0.010f, h), controlFill, 4.5),
-        accentContainer = accentContainer,
-        onAccentContainer = ensureContrast(tone(L_ON_ACCENT_CONTAINER_L, 0.02f, h), accentContainer, 4.5),
-        gradientTop = gradientTop,
-        gradientBottom = gradientBottom,
-        surfaceLow = tone(L_SURFACE_LOW_L, L_SURFACE_LOW_C, h),
-        surfaceContainer = surfaceContainer,
-        surfaceHigh = tone(L_SURFACE_HIGH_L, L_SURFACE_HIGH_C, h),
-        surfaceHighest = tone(L_SURFACE_HIGHEST_L, L_SURFACE_HIGHEST_C, h),
-        onSurface = ensureContrast(tone(L_ON_SURFACE_L, 0.010f, h), surfaceContainer, 4.5),
-        onSurfaceVariant = ensureContrast(tone(L_ON_SURFACE_VARIANT_L, 0.020f, h), surfaceContainer, 4.0),
-        outline = tone(L_OUTLINE_L, 0.025f, h),
-        outlineVariant = tone(L_OUTLINE_VARIANT_L, 0.025f, h),
-        fadedTrack = tone(L_FADED_L, 0.04f, h),
+        surfaceHigh = tone(SURFACE_HIGH_L, SURFACE_HIGH_C, h),
+        surfaceHighest = tone(SURFACE_HIGHEST_L, SURFACE_HIGHEST_C, h),
+        onSurface = ensureContrast(tone(ON_SURFACE_L, 0.010f, h), surfaceContainer, 4.5),
+        onSurfaceVariant = ensureContrast(tone(ON_SURFACE_VARIANT_L, 0.020f, h), surfaceContainer, 4.0),
+        outline = tone(OUTLINE_L, 0.025f, h),
+        outlineVariant = tone(OUTLINE_VARIANT_L, 0.025f, h),
+        fadedTrack = tone(fadedLightness, fadedChroma, h),
     )
 }
 
@@ -241,9 +161,9 @@ private fun lightPalette(seed: ArtworkSeed): PlayerPalette {
 /**
  * HSL 的色度 `c = (1-|2L-1|)×s` → 由目标色度**反解**需要的饱和度。
  *
- * 高明度/低明度时"分母"（1-|2L-1|）变小，同样 c 需要很大的 s —— 反解自动处理了这件事，
- * 这正是 0.1.43 那次"#F8F8F9 等于纯白"的正确解法。s 超过 1 说明目标 L 下给不出这个 c，
- * 直接封顶（宁可色度略低于目标，也不要炸掉）。
+ * 高明度/低明度时"分母"（1-|2L-1|）变小，同样 c 需要很大的 s —— 反解自动处理了这件事
+ * （0.1.43 第一版没做这一步，L=0.975 时算出 #F8F8F9 等于纯白）。
+ * s 超过 1 说明目标 L 下给不出这个 c，封顶 1（宁可色度略低于目标，也不要炸掉）。
  */
 private fun saturationForChroma(chroma: Float, lightness: Float): Float {
     val span = 1f - abs(2f * lightness - 1f)
@@ -281,9 +201,8 @@ fun pickArtworkSeed(pixels: IntArray): ArtworkSeed? =
 /**
  * 选种子（**宽松档兜底**）。
  *
- * 实机统计（0.1.42）：连续跳歌 10 首里 8 首严格档返回 null → 播放器直接掉回默认色，
- * 客观上就是"很多封面没取色"。原因很朴素：卡面是整幅插画，量化到 32 级后
- * **单桶占比很难到 2%**，而饱和度 0.28 也把柔和的画面挡在外面。
+ * 实机统计（0.1.42）：连跳 10 首有 8 首严格档返回 null → 播放器掉回默认色。
+ * 原因：卡面是整幅插画，量化到 32 级后单桶占比很难到 2%，饱和度 0.28 也挡掉柔和画面。
  */
 fun pickArtworkSeedLoose(pixels: IntArray): ArtworkSeed? =
     pickSeed(pixels, LOOSE_SATURATION, LOOSE_MIN_SHARE, LOOSE_MIN_LIGHTNESS, LOOSE_MAX_LIGHTNESS)
@@ -339,36 +258,16 @@ private fun pickSeed(
 }
 
 /**
- * 封面整体的平均 HSL 亮度（0..1）—— "这张封面亮不亮"的判据。
- *
- * ⚠️ 不能用 [pickArtworkSeed] 的 `lightness`：种子挑的是"又大又艳"的那一桶，
- * 一张 90% 白底 + 一点深蓝的卡，种子会是白的没错，但一张 80% 黑底 + 亮蓝高光的卡
- * 种子也会是亮蓝 —— 用种子亮度判明暗会把后者误判成浅色。所以单独算平均。
- */
-fun averageLightness(pixels: IntArray): Float {
-    var sum = 0.0
-    var n = 0
-    for (argb in pixels) {
-        if (((argb ushr 24) and 0xFF) < 0x80) continue
-        val r = (argb shr 16) and 0xFF
-        val g = (argb shr 8) and 0xFF
-        val b = argb and 0xFF
-        sum += (max(r, max(g, b)) + min(r, min(g, b))) / 510.0
-        n++
-    }
-    return if (n == 0) 0f else (sum / n).toFloat()
-}
-
-/**
  * 由封面像素生成播放器调色板；连宽松档都挑不出种子时才返回 null
- * （调用方回退到 App 当前主题的配色方案）。
+ * （调用方回退到 App 主题的浅色方案）。
  *
- * 明暗由 [averageLightness] 决定，见 [LIGHT_COVER_THRESHOLD]。
+ * 0.1.45 起不再判封面明暗 —— **无论封面多暗都生成浅色**（用户拍板），
+ * 种子只贡献色相，这是 Gramophone 的结构（seed → M3 scheme，明暗跟主题）。
  */
 fun playerPaletteFromPixels(pixels: IntArray): PlayerPalette? {
     // 严格档挑不出来就放宽再来一次：实机上一半以上的卡面需要这一档
     val seed = pickArtworkSeed(pixels) ?: pickArtworkSeedLoose(pixels) ?: return null
-    return if (averageLightness(pixels) >= LIGHT_COVER_THRESHOLD) lightPalette(seed) else darkPalette(seed)
+    return palette(seed)
 }
 
 // ── 颜色小工具（都是纯函数、都被自检覆盖）──

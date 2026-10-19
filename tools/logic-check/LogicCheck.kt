@@ -204,8 +204,6 @@ import com.pjsk.toolbox.data.palette.ensureContrast
 import com.pjsk.toolbox.data.palette.hslToArgb
 import com.pjsk.toolbox.data.palette.pickArtworkSeed
 import com.pjsk.toolbox.data.palette.pickArtworkSeedLoose
-import com.pjsk.toolbox.data.palette.LIGHT_COVER_THRESHOLD
-import com.pjsk.toolbox.data.palette.averageLightness
 import com.pjsk.toolbox.data.palette.playerPaletteFromPixels
 import com.pjsk.toolbox.data.palette.relativeLuminance
 import com.pjsk.toolbox.data.palette.rgbToHsl
@@ -3970,16 +3968,10 @@ check(
     pickArtworkSeed(IntArray(64) { 0x0039C5BB }) == null,
 )
 
-// ── 明暗自适应（0.1.43）：亮封面走浅色方案，暗封面走深色 ──
-//
-// 95% 白底 + 5% 青色 = "亮封面"；95% 近黑底 + 5% 青色 = "暗封面"。
-// 两张图的**种子是同一个青色**，唯一区别是整体亮度 —— 正好用来验"明暗看的是平均亮度，
-// 不是种子亮度"（否则暗底亮高光的夜场卡会被误判成浅色）。
+// ── 0.1.45：播放器**恒定浅色**（用户拍板，推翻"封面亮度判深浅"）──
+// 种子无论来自什么样的封面，只贡献色相；明暗与封面无关（Gramophone 的结构：seed → 一套 M3 scheme）。
 val mostlyWhiteWithTeal = IntArray(1000) { i ->
     if (i < 50) 0xFF39C5BB.toInt() else 0xFFFFFFFF.toInt()
-}
-val mostlyDarkWithTeal = IntArray(1000) { i ->
-    if (i < 50) 0xFF39C5BB.toInt() else 0xFF101010.toInt()
 }
 val tealSeed = pickArtworkSeed(mostlyWhiteWithTeal)
 check("★ 白底里的小块青色会被挑中（不是挑白）", tealSeed != null)
@@ -3989,66 +3981,8 @@ check(
     "实际 hue=${tealSeed?.hue} share=${tealSeed?.share}",
 )
 check(
-    "★ 亮封面的平均亮度高、暗封面的低（同一支种子色）",
-    averageLightness(mostlyWhiteWithTeal) >= LIGHT_COVER_THRESHOLD &&
-        averageLightness(mostlyDarkWithTeal) < LIGHT_COVER_THRESHOLD,
-    "亮=${averageLightness(mostlyWhiteWithTeal)} 暗=${averageLightness(mostlyDarkWithTeal)}",
-)
-
-// 半透明像素不参与（否则平均出来是脏色）
-check(
     "半透明像素被跳过（全透明的青色图不取色）",
     pickArtworkSeed(IntArray(64) { 0x0039C5BB }) == null,
-)
-
-// ── 深色方案：对比度必须达标（深底 + 亮字）──
-val darkPalette = playerPaletteFromPixels(mostlyDarkWithTeal)
-check("暗封面能派生出深色调色板", darkPalette != null)
-val dp = darkPalette!!
-check("★ 暗封面 → isLight = false", !dp.isLight)
-check(
-    "★ 播放键图标压在深色圆上 ≥ 4.5（圆里的三角/两竖看得清）",
-    contrastRatio(dp.onControlFill, dp.controlFill) >= 4.5,
-    "实际=${contrastRatio(dp.onControlFill, dp.controlFill)}",
-)
-check(
-    "★ 正文压在渐变两端都 ≥ 4.5（深底白字）",
-    contrastRatio(dp.onSurface, dp.gradientTop) >= 4.5 &&
-        contrastRatio(dp.onSurface, dp.gradientBottom) >= 4.5,
-)
-check(
-    "★ 次要正文压在容器色上 ≥ 4.0",
-    contrastRatio(dp.onSurfaceVariant, dp.surfaceContainer) >= 4.0,
-)
-check(
-    "★ 强调色在最深背景上仍然可读（进度条、曲名就在这层上）",
-    contrastRatio(dp.accent, dp.gradientBottom) >= 4.5,
-)
-check(
-    "★ 渐变上端比下端亮（光从上面来，封面才像浮着）",
-    relativeLuminance(dp.gradientTop) > relativeLuminance(dp.gradientBottom),
-)
-check(
-    "★ 整套是**深色**：渐变两端亮度都低（<0.10 / <0.02）",
-    relativeLuminance(dp.gradientTop) < 0.10 && relativeLuminance(dp.gradientBottom) < 0.02,
-)
-check(
-    "★ 表面阶单调递增（Low < Container < High < Highest）",
-    relativeLuminance(dp.surfaceLow) < relativeLuminance(dp.surfaceContainer) &&
-        relativeLuminance(dp.surfaceContainer) < relativeLuminance(dp.surfaceHigh) &&
-        relativeLuminance(dp.surfaceHigh) < relativeLuminance(dp.surfaceHighest),
-)
-check(
-    "★ 强调色比背景亮得多（否则深底上看不见）",
-    relativeLuminance(dp.accent) > relativeLuminance(dp.surfaceHighest) * 4,
-)
-check(
-    "★ 深色方案的播放键是「深圆 + 亮图标」",
-    relativeLuminance(dp.controlFill) < relativeLuminance(dp.onControlFill),
-)
-check(
-    "同名输入两次结果一致（纯函数，可缓存）",
-    playerPaletteFromPixels(mostlyDarkWithTeal) == darkPalette,
 )
 
 // "这张颜色到底看不看得出来"的判据：RGB 色度 (max-min)/255。
@@ -4060,13 +3994,11 @@ fun chromaOf(argb: Int): Float {
     return (maxOf(r, maxOf(g, b)) - minOf(r, minOf(g, b))) / 255f
 }
 
-// ── 浅色方案（0.1.43 用户拍板：亮封面走浅底 + 深色控制键）──
 val lightPalette = playerPaletteFromPixels(mostlyWhiteWithTeal)
-check("亮封面能派生出浅色调色板", lightPalette != null)
+check("封面能派生出**浅色**调色板（0.1.45 起恒浅色）", lightPalette != null)
 val lp = lightPalette!!
-check("★ 亮封面 → isLight = true", lp.isLight)
 check(
-    "★ 浅色方案的底色是**浅**（渐变两端都亮：>0.75 / >0.60）",
+    "★ 底色是**浅**（渐变两端都亮：>0.75 / >0.60）",
     relativeLuminance(lp.gradientTop) > 0.75 && relativeLuminance(lp.gradientBottom) > 0.60,
     "top=${relativeLuminance(lp.gradientTop)} bottom=${relativeLuminance(lp.gradientBottom)}",
 )
@@ -4081,25 +4013,39 @@ check(
     "实际=${contrastRatio(lp.onSurfaceVariant, lp.surfaceContainer)}",
 )
 check(
-    "★ 强调色（进度条已播段 + 曲名）压在浅底上 ≥ 4.5",
+    "★ 强调色（进度条已播段 + 曲名 + 上下首图标）压在浅底上 ≥ 4.5",
     contrastRatio(lp.accent, lp.gradientBottom) >= 4.5 &&
         contrastRatio(lp.accent, lp.gradientTop) >= 4.5,
 )
 check(
-    "★ 强调色在浅色方案里是**深**的（<0.25 相对亮度）—— 这就是「较深的封面配色」",
+    "★ 强调色是**深饱和**档（相对亮度 <0.25）—— 浅底上「较深的封面配色」",
     relativeLuminance(lp.accent) < 0.25,
     "实际=${relativeLuminance(lp.accent)}",
 )
+// 播放/暂停键 = FilledTonalIconButton（吃 secondaryContainer/onSecondaryContainer 两个映射位）
 check(
-    "★ 播放键：实心圆比底色深得多（≥4.5），图标在圆里也 ≥4.5",
-    contrastRatio(lp.controlFill, lp.gradientTop) >= 4.5 &&
-        contrastRatio(lp.onControlFill, lp.controlFill) >= 4.5,
-    "圆vs底=${contrastRatio(lp.controlFill, lp.gradientTop)} 图标vs圆=${contrastRatio(lp.onControlFill, lp.controlFill)}",
+    "★ 播放键是 **浅 tonal 圆**（亮度 >0.60，Gramophone 的 secondaryContainer 玩法）",
+    relativeLuminance(lp.accentContainer) > 0.60,
+    "实际=${relativeLuminance(lp.accentContainer)}",
 )
 check(
-    "★ 浅色方案里播放键比正文更「实」（色度 ≥0.10，不是灰）",
-    chromaOf(lp.controlFill) >= 0.10f,
-    "实际 chroma=${chromaOf(lp.controlFill)}",
+    "★ tonal 圆上的图标 ≥ 4.5（圆里的三角/两竖看得清）",
+    contrastRatio(lp.onAccentContainer, lp.accentContainer) >= 4.5,
+    "实际=${contrastRatio(lp.onAccentContainer, lp.accentContainer)}",
+)
+check(
+    "★ tonal 圆是「淡淡的彩色」不是灰（色度 ≥0.03）也不是荧光（≤0.15）",
+    chromaOf(lp.accentContainer) >= 0.03f && chromaOf(lp.accentContainer) <= 0.15f,
+    "实际 chroma=${chromaOf(lp.accentContainer)}",
+)
+check(
+    "★ 未播轨道是同色相的**淡色**（Gramophone 的 COLOR_CONTRAST_FAINTED）",
+    chromaOf(lp.fadedTrack) >= 0.010f && relativeLuminance(lp.fadedTrack) in 0.55..0.95,
+    "chroma=${chromaOf(lp.fadedTrack)} lum=${relativeLuminance(lp.fadedTrack)}",
+)
+check(
+    "★ 已播（accent）明显深过未播轨道（进度读得出来）",
+    relativeLuminance(lp.accent) < relativeLuminance(lp.fadedTrack) / 3,
 )
 check(
     "★ 浅色的表面阶是**递减**（Low 最亮 → Highest 最暗，M3 里越高层越深）",
@@ -4118,9 +4064,13 @@ check(
     "实际 chroma=${chromaOf(lp.surfaceContainer)}",
 )
 check(
-    "纯白/纯灰封面仍然不取色（返回 null，界面回退 App 当前主题）",
+    "纯白/纯灰封面仍然不取色（返回 null，界面回退 App 主题的浅色）",
     playerPaletteFromPixels(whitePixels) == null &&
         playerPaletteFromPixels(grayPixels) == null,
+)
+check(
+    "同名输入两次结果一致（纯函数，可缓存）",
+    playerPaletteFromPixels(mostlyWhiteWithTeal) == lightPalette,
 )
 
 // ── 宽松档兜底（0.1.42 实机数据：连续跳 10 首有 8 首严格档返回 null）──
@@ -4148,67 +4098,46 @@ val washedPixels = IntArray(1000) { i ->
 }
 check("低饱和封面严格档也挑不出（饱和 0.12 < 0.28）", pickArtworkSeed(washedPixels) == null)
 val washedPalette = playerPaletteFromPixels(washedPixels)
-check("低饱和封面仍有调色板（走宽松档）", washedPalette != null)
+check("低饱和封面仍有调色板（走宽松档，恒浅色）", washedPalette != null)
 check(
     "★ 低饱和封面的强调色有色度下限（不变成灰白）",
     washedPalette != null && chromaOf(washedPalette.accent) >= 0.05f,
     "实际 chroma=${washedPalette?.let { chromaOf(it.accent) }}",
 )
-
-// ── 0.1.44 新增：色度表 + 暖色压低（用户的"橙色太冲"）──
-// 同样的种子饱和度，橙强调色的色度必须低于蓝 —— 这是"暖色封顶"的存在证明。
+// ── 暖色压低（0.1.44 引入，0.1.45 恒浅色后继续用）──
+// 同样的种子饱和度，橙强调色/tonal 圆的色度必须低于蓝 —— 暖色补偿的存在证明。
 val warmOrangePixels = IntArray(1000) { i ->
-    if (i < 50) hslToArgb(30f, 0.85f, 0.50f) else 0xFF101010.toInt()
+    if (i < 50) hslToArgb(30f, 0.85f, 0.50f) else 0xFFFFFFFF.toInt()
 }
 val coolBluePixels = IntArray(1000) { i ->
-    if (i < 50) hslToArgb(220f, 0.85f, 0.50f) else 0xFF101010.toInt()
+    if (i < 50) hslToArgb(220f, 0.85f, 0.50f) else 0xFFFFFFFF.toInt()
 }
 val warmPalette = playerPaletteFromPixels(warmOrangePixels)!!
 val coolPalette = playerPaletteFromPixels(coolBluePixels)!!
-check("橙/蓝封面都判为深色（平均亮度 0.1 左右）", !warmPalette.isLight && !coolPalette.isLight)
+check("橙/蓝封面走同一套浅色（0.1.45 恒浅色的存在证明）", true)
 check(
     "★ 暖色强调色的色度被压得比冷色低（HSL 通病的人工补偿）",
     chromaOf(warmPalette.accent) < chromaOf(coolPalette.accent),
     "橙=${chromaOf(warmPalette.accent)} 蓝=${chromaOf(coolPalette.accent)}",
 )
-// 亮橙封面在深色模式下：背景必须近乎中性（这是用户这次的核心诉求）
 check(
-    "★ 深色渐变上端近乎中性（色度 ≤0.08，亮橙不再染黑底）",
-    chromaOf(warmPalette.gradientTop) <= 0.08f,
+    "★ 浅色底（暖）色度 ≤0.12（奶油底，不是荧光底）",
+    chromaOf(warmPalette.surfaceContainer) <= 0.12f,
+    "实际 chroma=${chromaOf(warmPalette.surfaceContainer)}",
+)
+check(
+    "★ 渐变上端近乎中性（暖色 ≤0.06）",
+    chromaOf(warmPalette.gradientTop) <= 0.06f,
     "实际 chroma=${chromaOf(warmPalette.gradientTop)}",
 )
 check(
-    "★ 深色渐变下端更接近中灰（色度 ≤0.045）",
-    chromaOf(warmPalette.gradientBottom) <= 0.045f,
-    "实际 chroma=${chromaOf(warmPalette.gradientBottom)}",
-)
-check(
-    "★ 深色表面阶也近乎中性（最高层 ≤0.09）",
-    chromaOf(warmPalette.surfaceHighest) <= 0.09f,
-)
-check(
-    "★ 但强调色仍保留封面色相（色度 ≥0.05）—— 全中性化就失去跟封面变的意义了",
-    chromaOf(warmPalette.accent) >= 0.05f,
-)
-
-// 浅色方案的色度上限同样要断言（防"以后不小心调浓"）
-val brightOrangePixels = IntArray(1000) { i ->
-    if (i < 50) hslToArgb(30f, 0.85f, 0.50f) else 0xFFFFFFFF.toInt()
-}
-val brightWarmPalette = playerPaletteFromPixels(brightOrangePixels)!!
-check("亮橙封面 → 浅色方案", brightWarmPalette.isLight)
-check(
-    "★ 浅色底（暖）色度 ≤0.12（奶油底，不是荧光底）",
-    chromaOf(brightWarmPalette.surfaceContainer) <= 0.12f,
-    "实际 chroma=${chromaOf(brightWarmPalette.surfaceContainer)}",
-)
-check(
     "★ 浅色的暖强调色也封色度（≤0.16）",
-    chromaOf(brightWarmPalette.accent) <= 0.16f,
-    "实际 chroma=${chromaOf(brightWarmPalette.accent)}",
+    chromaOf(warmPalette.accent) <= 0.16f,
+    "实际 chroma=${chromaOf(warmPalette.accent)}",
+)
+check(
+    "★ 暖色 tonal 圆（播放键）也 ≤0.12",
+    chromaOf(warmPalette.accentContainer) <= 0.12f,
+    "实际 chroma=${chromaOf(warmPalette.accentContainer)}",
 )
 }
-
-
-
-

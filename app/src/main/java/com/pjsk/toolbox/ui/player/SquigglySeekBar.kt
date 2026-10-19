@@ -14,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -61,6 +62,9 @@ fun SquigglySeekBar(
     enabled: Boolean,
     onSeek: (Float) -> Unit,
     modifier: Modifier = Modifier,
+    /** 未播轨道的颜色。默认中性灰；留声器是把 secondaryContainer 的色度 ×0.7、亮度 ×0.97，
+     *  我们用调色板的 [com.pjsk.toolbox.data.palette.PlayerPalette.fadedTrack]（同一条种子色相的淡色）。 */
+    trackColor: Color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
     waveLength: Dp = 27.dp,
     amplitude: Dp = 2.7.dp,
     trackWidth: Dp = 2.dp,
@@ -73,7 +77,6 @@ fun SquigglySeekBar(
     var dragFraction by remember { mutableStateOf<Float?>(null) }
     val shown = (dragFraction ?: fraction).coerceIn(0f, 1f)
 
-    val trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)
     val progressColor = MaterialTheme.colorScheme.primary
     val thumbColor = MaterialTheme.colorScheme.primary
     val density = LocalDensity.current
