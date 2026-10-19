@@ -4097,12 +4097,9 @@ check(
     "圆vs底=${contrastRatio(lp.controlFill, lp.gradientTop)} 图标vs圆=${contrastRatio(lp.onControlFill, lp.controlFill)}",
 )
 check(
-    "★ 浅色方案里播放键比正文更「实」（饱和色，不是灰）",
-    rgbToHsl(
-        ((lp.controlFill shr 16) and 0xFF).toFloat(),
-        ((lp.controlFill shr 8) and 0xFF).toFloat(),
-        (lp.controlFill and 0xFF).toFloat(),
-    )[1] >= 0.40f,
+    "★ 浅色方案里播放键比正文更「实」（色度 ≥0.10，不是灰）",
+    chromaOf(lp.controlFill) >= 0.10f,
+    "实际 chroma=${chromaOf(lp.controlFill)}",
 )
 check(
     "★ 浅色的表面阶是**递减**（Low 最亮 → Highest 最暗，M3 里越高层越深）",
@@ -4144,7 +4141,8 @@ check(
     "★ 宽松档下调色板不为 null —— 不再掉回与封面无关的默认色",
     playerPaletteFromPixels(spreadPixels) != null,
 )
-// 低饱和种子（宽松档的常见结果）：强调色必须垫饱和度下限，否则和"没取色"看不出区别
+// 低饱和种子（宽松档的常见结果）：强调色有**色度下限**，否则和"没取色"看不出区别。
+// 0.1.44 起判据换成色度（HSL 的 s 依赖明度，还叠了暖色压低，用 s 判太飘）。
 val washedPixels = IntArray(1000) { i ->
     if (i % 2 == 0) hslToArgb(205f, 0.12f, 0.50f) else hslToArgb(25f, 0.12f, 0.50f)
 }
@@ -4152,13 +4150,62 @@ check("低饱和封面严格档也挑不出（饱和 0.12 < 0.28）", pickArtwor
 val washedPalette = playerPaletteFromPixels(washedPixels)
 check("低饱和封面仍有调色板（走宽松档）", washedPalette != null)
 check(
-    "★ 低饱和封面的强调色有饱和度下限（不变成灰白）",
-    washedPalette != null &&
-        rgbToHsl(
-            ((washedPalette.accent shr 16) and 0xFF).toFloat(),
-            ((washedPalette.accent shr 8) and 0xFF).toFloat(),
-            (washedPalette.accent and 0xFF).toFloat(),
-        )[1] >= 0.20f,
+    "★ 低饱和封面的强调色有色度下限（不变成灰白）",
+    washedPalette != null && chromaOf(washedPalette.accent) >= 0.05f,
+    "实际 chroma=${washedPalette?.let { chromaOf(it.accent) }}",
+)
+
+// ── 0.1.44 新增：色度表 + 暖色压低（用户的"橙色太冲"）──
+// 同样的种子饱和度，橙强调色的色度必须低于蓝 —— 这是"暖色封顶"的存在证明。
+val warmOrangePixels = IntArray(1000) { i ->
+    if (i < 50) hslToArgb(30f, 0.85f, 0.50f) else 0xFF101010.toInt()
+}
+val coolBluePixels = IntArray(1000) { i ->
+    if (i < 50) hslToArgb(220f, 0.85f, 0.50f) else 0xFF101010.toInt()
+}
+val warmPalette = playerPaletteFromPixels(warmOrangePixels)!!
+val coolPalette = playerPaletteFromPixels(coolBluePixels)!!
+check("橙/蓝封面都判为深色（平均亮度 0.1 左右）", !warmPalette.isLight && !coolPalette.isLight)
+check(
+    "★ 暖色强调色的色度被压得比冷色低（HSL 通病的人工补偿）",
+    chromaOf(warmPalette.accent) < chromaOf(coolPalette.accent),
+    "橙=${chromaOf(warmPalette.accent)} 蓝=${chromaOf(coolPalette.accent)}",
+)
+// 亮橙封面在深色模式下：背景必须近乎中性（这是用户这次的核心诉求）
+check(
+    "★ 深色渐变上端近乎中性（色度 ≤0.08，亮橙不再染黑底）",
+    chromaOf(warmPalette.gradientTop) <= 0.08f,
+    "实际 chroma=${chromaOf(warmPalette.gradientTop)}",
+)
+check(
+    "★ 深色渐变下端更接近中灰（色度 ≤0.045）",
+    chromaOf(warmPalette.gradientBottom) <= 0.045f,
+    "实际 chroma=${chromaOf(warmPalette.gradientBottom)}",
+)
+check(
+    "★ 深色表面阶也近乎中性（最高层 ≤0.09）",
+    chromaOf(warmPalette.surfaceHighest) <= 0.09f,
+)
+check(
+    "★ 但强调色仍保留封面色相（色度 ≥0.05）—— 全中性化就失去跟封面变的意义了",
+    chromaOf(warmPalette.accent) >= 0.05f,
+)
+
+// 浅色方案的色度上限同样要断言（防"以后不小心调浓"）
+val brightOrangePixels = IntArray(1000) { i ->
+    if (i < 50) hslToArgb(30f, 0.85f, 0.50f) else 0xFFFFFFFF.toInt()
+}
+val brightWarmPalette = playerPaletteFromPixels(brightOrangePixels)!!
+check("亮橙封面 → 浅色方案", brightWarmPalette.isLight)
+check(
+    "★ 浅色底（暖）色度 ≤0.12（奶油底，不是荧光底）",
+    chromaOf(brightWarmPalette.surfaceContainer) <= 0.12f,
+    "实际 chroma=${chromaOf(brightWarmPalette.surfaceContainer)}",
+)
+check(
+    "★ 浅色的暖强调色也封色度（≤0.16）",
+    chromaOf(brightWarmPalette.accent) <= 0.16f,
+    "实际 chroma=${chromaOf(brightWarmPalette.accent)}",
 )
 }
 
