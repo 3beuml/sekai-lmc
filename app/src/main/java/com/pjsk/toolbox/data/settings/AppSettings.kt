@@ -303,6 +303,31 @@ class AppSettings(context: Context) {
         return PlayerAccount(server = server, gameId = gameId)
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // 检测更新：「不再提醒」的版本号
+    //
+    // 只存**具体版本**（如 "0.1.45"），不存一个"关掉更新提醒"的布尔开关：
+    // 用户的意思是"这一版我暂时不升"，不是"以后都别告诉我"。所以之后出了
+    // 更新的版本，角标仍然会亮（判定在 `AppUpdate.shouldShowDot`）。
+    // ─────────────────────────────────────────────────────────────
+
+    private val _updateMutedVersion = MutableStateFlow(readUpdateMutedVersion())
+    val updateMutedVersion: StateFlow<String?> = _updateMutedVersion.asStateFlow()
+
+    /** 屏蔽某一版的提醒；传 null 清掉屏蔽。 */
+    fun setUpdateMutedVersion(version: String?) {
+        val value = version?.trim()?.takeIf { it.isNotBlank() }
+        if (value == null) {
+            prefs.edit().remove(KEY_UPDATE_MUTED).apply()
+        } else {
+            prefs.edit().putString(KEY_UPDATE_MUTED, value).apply()
+        }
+        _updateMutedVersion.value = value
+    }
+
+    private fun readUpdateMutedVersion(): String? =
+        prefs.getString(KEY_UPDATE_MUTED, null)?.takeIf { it.isNotBlank() }
+
     /**
      * 把存下来的字符串还原成枚举。
      *
@@ -327,6 +352,7 @@ class AppSettings(context: Context) {
         const val KEY_PREFERRED_VOCALS = "preferred_vocals"
         const val KEY_PLAYER_SERVER = "player_server"
         const val KEY_PLAYER_GAME_ID = "player_game_id"
+        const val KEY_UPDATE_MUTED = "update_muted_version"
     }
 }
 

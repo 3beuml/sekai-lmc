@@ -31,6 +31,10 @@ class PjskApp : Application(), ImageLoaderFactory {
         // 版本没变的话它一个文件都不下，变了才会去补 —— 这样新活动上线后
         // 用户只要打开 App 就能看到，不需要自己去点「数据同步」。
         container.autoSyncOnStart(appScope)
+        // 开屏顺便问一次 GitHub 有没有新 release（「更多 → 检测更新」与底部「更多」角标用）。
+        // 失败无声：角标不误报、不弹打扰，也绝不影响启动流程。
+        // 说明：这是**每个进程一次**的请求，不和 master data 的同步冲突。
+        container.updateCenter.checkSilently()
     }
 
     /**

@@ -34,8 +34,8 @@ android {
         applicationId = "com.pjsk.toolbox"
         minSdk = 26
         targetSdk = 36
-        versionCode = 46
-        versionName = "0.1.45"
+        versionCode = 47
+        versionName = "0.2.0"
     }
 
     signingConfigs {
@@ -50,6 +50,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // 排查问题时装 debug 包可以直接覆盖正式包（同签名、不丢数据）。
+            // 没有正式密钥时保持默认（debug 签名）。
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(

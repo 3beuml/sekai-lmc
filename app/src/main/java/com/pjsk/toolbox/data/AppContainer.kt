@@ -18,6 +18,7 @@ import com.pjsk.toolbox.data.sync.BundledState
 import com.pjsk.toolbox.data.sync.MasterImporter
 import com.pjsk.toolbox.data.sync.SyncManager
 import com.pjsk.toolbox.data.story.StoryRepository
+import com.pjsk.toolbox.data.update.UpdateCenter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -159,6 +160,14 @@ class AppContainer(private val context: Context) {
     val masterRefRepository: MasterRefRepository by lazy {
         MasterRefRepository(database.masterDao())
     }
+
+    /**
+     * 检测更新（App 自身版本，与 master data 的数据同步无关）。
+     *
+     * 用**自己那个短超时的 OkHttpClient**（见 `AppReleaseClient`），不共用
+     * [httpClient]：那边为 54 MB 的数据表留了 180 秒，拿来问一次 release 太久了。
+     */
+    val updateCenter: UpdateCenter by lazy { UpdateCenter(appSettings) }
 
     /** 内置数据快照（打包在 APK 的 assets 里）。 */
     val bundledPack: BundledPack by lazy {

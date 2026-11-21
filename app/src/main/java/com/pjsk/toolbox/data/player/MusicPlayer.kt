@@ -3,6 +3,7 @@ package com.pjsk.toolbox.data.player
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -10,11 +11,19 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.pjsk.toolbox.data.home.HomeMusic
 import com.pjsk.toolbox.data.music.fillerMsOf
@@ -35,8 +44,17 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import okhttp3.Call
+import okhttp3.ConnectionPool
+import okhttp3.Dns
+import okhttp3.EventListener
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import java.io.File
+import java.net.Inet6Address
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.util.concurrent.TimeUnit
 
 /**
  * 一条可以播放的「轨」＝一个演唱版本。
@@ -262,6 +280,37 @@ fun rowPlayState(
 }
 
 /**
+ * `playWhenReady` 变化原因的可读名。**纯函数**，只给诊断日志用。
+ *
+ * 排查"播放断一下又自己恢复"时，这一行是分水岭：
+ * `audio-focus-loss` = 焦被别的 App 抢走（media3 自动暂停、焦点还回来再自动继续）；
+ * `user` = 我们自己的按钮；`end-of-item` = 正常播完。
+ */
+fun playWhenReadyReasonName(reason: Int): String = when (reason) {
+    Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST -> "user"
+    Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS -> "audio-focus-loss"
+    Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM -> "end-of-item"
+    Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE -> "remote"
+    else -> "other($reason)"
+}
+
+/**
+ * 位置跳变原因的可读名。**纯函数**，只给诊断日志用。
+ *
+ * `seek` = 有人调了 seekTo（界面拖动、我们的跳空秒）；
+ * `auto-transition` = 一首播完自动进下一首；`internal` = 播放器内部调整。
+ */
+fun discontinuityReasonName(reason: Int): String = when (reason) {
+    Player.DISCONTINUITY_REASON_AUTO_TRANSITION -> "auto-transition"
+    Player.DISCONTINUITY_REASON_SEEK -> "seek"
+    Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT -> "seek-adjustment"
+    Player.DISCONTINUITY_REASON_SKIP -> "skip"
+    Player.DISCONTINUITY_REASON_REMOVE -> "remove"
+    Player.DISCONTINUITY_REASON_INTERNAL -> "internal"
+    else -> "other($reason)"
+}
+
+/**
  * 点某个"演唱版本"时该怎么落地。**纯函数**，自检里断言。
  *
  * 规则是用户拍板的（2026-09-16 两轮才定下来）：
@@ -358,18 +407,47 @@ class MusicPlayerFactory(
 
     /** 建一个播放器实例。调用方负责在离开页面时 [MusicPlayer.release]。 */
     fun create(): MusicPlayer {
-        // 复用项目已有的 OkHttpClient（超时/重定向策略一致），
+        // 复用项目已有的 OkHttpClient 的**连接池与拦截器**（镜像回退在这一层），
+        // 但把超时换成适合**流式播放**的一套（见 [audioHttpClient] 的说明）。
         // 再套一层磁盘缓存：听过的歌第二次零流量，断网也能听。
-        val upstream = OkHttpDataSource.Factory(httpClient)
+        val upstream = OkHttpDataSource.Factory(audioHttpClient)
+        // 给音频请求打个标记，排查时能在拦截器日志里区分"播放器的请求"和"图片的请求"
+        upstream.setDefaultRequestProperties(mapOf(HEADER_AUDIO_CLIENT to "1"))
         val dataSourceFactory = CacheDataSource.Factory()
             .setCache(cache)
-            .setUpstreamDataSourceFactory(upstream)
+            .setUpstreamDataSourceFactory(
+                object : DataSource.Factory {
+                    override fun createDataSource(): DataSource = SlowSourceGuard(upstream.createDataSource())
+                },
+            )
             // 缓存写失败（比如磁盘满）时不要卡住播放，直接用网络
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
-        val player = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+        // 默认是"总缓冲 50 秒、重缓冲后要攒够 5 秒才继续"——在镜像抖动时
+        // 正好对应"断一下、几秒后自己续上"。把预读加到 90~120 秒（一首歌基本整首
+        // 提前拉下来），重缓冲门槛降到 2 秒，听感上就是抖动被吃掉、真断了也更快接上。
+        // 起播门槛**不动**（2.5 秒），否则点了播放要等更久才出声。
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ AUDIO_MIN_BUFFER_MS,
+                /* maxBufferMs = */ AUDIO_MAX_BUFFER_MS,
+                /* bufferForPlaybackMs = */ AUDIO_BUFFER_FOR_PLAYBACK_MS,
+                /* bufferForPlaybackAfterRebufferMs = */ AUDIO_BUFFER_AFTER_REBUFFER_MS,
+            )
             .build()
+
+        val player = ExoPlayer.Builder(context)
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(dataSourceFactory)
+                    // 网络抖动多给几次重连机会（默认 3 次）：退避 1s/2s/4s/5s…，
+                    // 6 次仍失败才报错 —— 一般是彻底断网，报错比干等诚实。
+                    .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(6)),
+            )
+            .setLoadControl(loadControl)
+            .build()
+        // 息屏/锁屏时继续在线拉流：不设这个，CPU 进 doze 后网络可能被挂起，
+        // 缓冲一空就是"断一下又续上"。（需要清单里的 WAKE_LOCK 权限。）
+        player.setWakeMode(C.WAKE_MODE_NETWORK)
         // 交给系统处理音频焦点：来电/别的 App 放歌时自动压低或暂停
         player.setAudioAttributes(
             AudioAttributes.Builder()
@@ -381,12 +459,214 @@ class MusicPlayerFactory(
         return MusicPlayer(context, player)
     }
 
+    /**
+     * 音频专用的 OkHttpClient —— **不能**直接用共享的 [httpClient]。
+     *
+     * 共享 client 为「54 MB 数据表」配了 `readTimeout=60s` / `callTimeout=180s`。
+     * OkHttp 的 `callTimeout` 覆盖**整个调用（含响应体读取）**，而一条正在播放的
+     * 音频流就是一个长达几分钟的调用 —— 慢线路上（或镜像失败回退到官方 CDN 时）
+     * 会被 180 秒直接掐断，表现正是"播到一半中断，重试后从原位置续上"。
+     * media3 的 `OkHttpDataSource` 不会覆盖 client 的超时；它自家的
+     * `DefaultHttpDataSource` 默认读超时只有 8 秒，就是为了"卡住就赶紧失败、交给播放器重连"。
+     *
+     * 所以这里派生一份：
+     *  · **不设整次超时**（`callTimeout=0`，播放长度本来就不该被计时）；
+     *  · 读超时 8 秒（与 media3 自家的 `DefaultHttpDataSource` 一致：卡住就赶紧失败、
+     *    交给播放器重连，别让用户对着静音等 20 秒）；
+     *  · 连接超时 15 秒。
+     * `newBuilder()` 共享连接池 / dispatcher / 拦截器，不会额外占资源。
+     */
+    private val audioHttpClient: OkHttpClient by lazy {
+        httpClient.newBuilder()
+            .callTimeout(0, TimeUnit.MILLISECONDS)
+            .readTimeout(AUDIO_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .connectTimeout(AUDIO_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            // ⚠️ **只用 HTTP/1.1**。
+            // 2026-11-20 真机实测（中国电信 5G、storage.exmeaning.com EdgeOne 节点）：
+            // 同样的文件、同样的时刻，curl（这个构建不支持 h2，走 h1）能跑到 0.8~4 MB/s，
+            // 而 App 的播放流稳定只有 ~16 KB/s —— 恰好低于 320 kbps 音频所需的 ~27 KB/s，
+            // 于是每播 2 秒就断 3~9 秒（日志里 buffering-start/end 无限循环）。
+            // 差异只剩协议：OkHttp 默认 ALPN 协商到 h2。音频是**单条长流**，
+            // h1 完全够用，不需要多路复用；换掉可以绕开该节点的 h2 限速/流控问题。
+            // 若将来换 CDN 后 h2 正常，这一行可以删掉（它不是正确性要求，只是规避）。
+            .protocols(listOf(Protocol.HTTP_1_1))
+            // ⚠️ **不保留空闲连接**（每个 load 都新建连接）。
+            // 实测同一条网络里，不同连接的速度能从 480 KB/s 掉到 16 KB/s；
+            // 而 `newBuilder()` 会**共享**共享 client 的连接池（Coil 图片也在里面），
+            // 一条半死的连接被复用时，整首歌都会卡在慢路径上，直到进程重启才好。
+            // 音频一次 load 是分钟级、不需要低延迟，多一次 TLS 握手（~200ms）换连接干净，值。
+            .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS))
+            // ⚠️ **DNS 层偏向 IPv6**。
+            // EventListener 实测（2026-11-20，中国电信 5G）：App 播放流解析到的是
+            // IPv4（123.6.40.77，286 kbps 甚至 16 KB/s），而同一时刻 curl 落在
+            // IPv6 边缘（240e:…，3~4 MB/s）。CDN 的 IPv6 路径明显更好。
+            // 这里只做**稳定排序**（AAAA 在前）：没有 AAAA 的网络结果不变；
+            // IPv6 连不上时 OkHttp 自己会落到 IPv4 —— 不硬编码任何地址。
+            .dns(preferIpv6Dns)
+            // 诊断：打印实际连到哪个 IP（IPv4 / IPv6）以及握手耗时。
+            // 这条数据决定"要不要在 DNS 层偏向 IPv6"——没有它只能猜。
+            .eventListener(audioEventListener)
+            .build()
+    }
+
+    /**
+     * 把 DNS 结果按地址族重排：IPv6 在前。
+     *
+     * `sortedByDescending` 是**稳定排序**：同为 IPv6 或同为 IPv4 的相对顺序不变，
+     * 所以不改变 OkHttp 原有的多地址遍历策略，只是让"优先尝试谁"换成 IPv6。
+     */
+    private val preferIpv6Dns = object : Dns {
+        override fun lookup(hostname: String): List<java.net.InetAddress> =
+            Dns.SYSTEM.lookup(hostname).sortedByDescending { it is Inet6Address }
+    }
+
+    /**
+     * 诊断：每次建连的远端地址族与耗时。
+     *
+     * 真机排查发现：同一条 5G 上，curl 每次都落在 IPv6 边缘节点（240e:…）且稳定 3~4 MB/s，
+     * 而 App 的播放流时不时只有 16 KB/s。需要确认 App 到底连的是 v4 还是 v6 ——
+     * `EventListener` 是 OkHttp 唯一能拿到"真实远端地址"的地方。
+     */
+    private val audioEventListener = object : EventListener() {
+        override fun connectStart(call: Call, inetSocketAddress: InetSocketAddress, proxy: Proxy) {
+            Log.i(TAG_AUDIO, "connect-start ${inetSocketAddress.address?.hostAddress}")
+        }
+
+        override fun connectEnd(
+            call: Call,
+            inetSocketAddress: InetSocketAddress,
+            proxy: Proxy,
+            protocol: Protocol?,
+        ) {
+            Log.i(
+                TAG_AUDIO,
+                "connect-end   ${inetSocketAddress.address?.hostAddress} proto=${protocol ?: "-"}",
+            )
+        }
+
+        override fun connectFailed(
+            call: Call,
+            inetSocketAddress: InetSocketAddress,
+            proxy: Proxy,
+            protocol: Protocol?,
+            error: java.io.IOException,
+        ) {
+            Log.i(
+                TAG_AUDIO,
+                "connect-fail  ${inetSocketAddress.address?.hostAddress} " +
+                    "${error.javaClass.simpleName}: ${error.message}",
+            )
+        }
+
+        /**
+         * 每个请求实际用到的连接（含**复用**的）—— 这是唯一能看到"这条请求到底
+         * 落在 IPv4 还是 IPv6"的地方（connectStart 只在新建连接时触发）。
+         */
+        override fun connectionAcquired(call: Call, connection: okhttp3.Connection) {
+            val remote = connection.route().socketAddress.address?.hostAddress
+            Log.i(
+                TAG_AUDIO,
+                "connection    $remote proto=${connection.protocol()}",
+            )
+        }
+    }
+
     private companion object {
         /**
          * 磁盘缓存上限。一首游戏版剪辑约 1.7 MB（128 kbps），
          * 256 MB 大约能装 150 首 —— 听过的都是零流量，且不会吃满手机存储。
          */
         const val MAX_CACHE_BYTES = 256L * 1024 * 1024
+
+        /** 目标预读 90~120 秒：一首游戏版音频约 2 分钟，等于基本整首提前拉下来。 */
+        const val AUDIO_MIN_BUFFER_MS = 90_000
+        const val AUDIO_MAX_BUFFER_MS = 120_000
+
+        /** 起播门槛保持默认 2.5 秒；重缓冲后 2 秒就继续（默认 5 秒太保守）。 */
+        const val AUDIO_BUFFER_FOR_PLAYBACK_MS = 2_500
+        const val AUDIO_BUFFER_AFTER_REBUFFER_MS = 2_000
+
+        const val AUDIO_READ_TIMEOUT_MS = 8_000L
+        const val AUDIO_CONNECT_TIMEOUT_MS = 15_000L
+
+        /** 和 [MusicPlayer] 用同一个 logcat tag，排查时 `-s MusicPlayer:I` 一次看全。 */
+        const val TAG_AUDIO = "MusicPlayer"
+
+        /** 给音频请求打的标记，MirrorFallbackInterceptor 据此区分播放器与图片的请求。 */
+        const val HEADER_AUDIO_CLIENT = "X-Sekai-Audio-Client"
+    }
+}
+
+/**
+ * 音频网络层的**低速熔断**（2026-11-20 排查"播着播着就停"的落点）。
+ *
+ * 真机实测（中国电信 5G / storage.exmeaning.com）：同样一条链路，不同连接的
+ * 实测吞吐能从 ~480 KB/s 掉到 ~16 KB/s —— 后者低于音频码率（约 240 kbps ≈ 30 KB/s），
+ * 播放必然断断续续；而 ExoPlayer 只在**出错**时才重连，一条"活着但很慢"的连接
+ * 会被一直用下去（我们见过连续几分钟 16 KB/s），怎么缓冲都救不回来。
+ *
+ * 所以在这里做平均值监控：一条连接跑过预热期（[GRACE_MS]，给 TCP 慢启动留时间）
+ * 之后，若**全程平均**吞吐仍低于 [MIN_RATE_BYTES_PER_SEC]，直接抛 IOException
+ * —— ExoPlayer 会按退避策略换连接重试（新连接很可能落在快路径上），
+ * 实在不行就报"播放失败"，比让用户干听卡顿诚实得多。
+ *
+ * ⚠️ 只包在 CacheDataSource 的**上游**（网络层），缓存读取不经过这里，不会误伤。
+ */
+private class SlowSourceGuard(private val upstream: DataSource) : DataSource {
+
+    private var openAtMs = 0L
+    private var bytesTotal = 0L
+
+    override fun addTransferListener(transferListener: TransferListener) {
+        upstream.addTransferListener(transferListener)
+    }
+
+    override fun open(dataSpec: DataSpec): Long {
+        openAtMs = SystemClock.elapsedRealtime()
+        bytesTotal = 0L
+        return upstream.open(dataSpec)
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val read = upstream.read(buffer, offset, length)
+        if (read > 0) bytesTotal += read
+        maybeAbort()
+        return read
+    }
+
+    private fun maybeAbort() {
+        val now = SystemClock.elapsedRealtime()
+        val elapsedSinceOpen = now - openAtMs
+        if (elapsedSinceOpen < GRACE_MS + MIN_EVALUATE_MS) return
+        val rateBytesPerSec = bytesTotal.toDouble() / elapsedSinceOpen
+        if (rateBytesPerSec < MIN_RATE_BYTES_PER_SEC) {
+            throw java.io.IOException(
+                "audio upstream too slow: ${"%.0f".format(rateBytesPerSec)} B/s " +
+                    "after ${elapsedSinceOpen / 1000}s (need ≥ ${MIN_RATE_BYTES_PER_SEC} B/s)",
+            )
+        }
+    }
+
+    override fun getUri(): Uri? = upstream.getUri()
+
+    override fun getResponseHeaders(): Map<String, List<String>> = upstream.responseHeaders
+
+    override fun close() {
+        upstream.close()
+    }
+
+    private companion object {
+        /** TCP 慢启动 + TLS 握手的预热期，这段时间不算吞吐。 */
+        const val GRACE_MS = 12_000L
+
+        /** 预热结束后至少再观察这么久才做判定，避免误杀正常连接。 */
+        const val MIN_EVALUATE_MS = 8_000L
+
+        /**
+         * 熔断线（字节/秒）。游戏版音频约 240 kbps ≈ 30 KB/s，
+         * 低于这条线的连接**无论如何撑不起播放**，重连才有机会。
+         */
+        const val MIN_RATE_BYTES_PER_SEC = 25_000.0
     }
 }
 
@@ -491,6 +771,22 @@ class MusicPlayer(
 
     private val listener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
+            /*
+             * 诊断：用户听到的"中断"就是 STATE_BUFFERING。
+             * 打一行 start/end + 位置，用来区分"从头就在等"和"播到中途断"。
+             */
+            when (playbackState) {
+                Player.STATE_BUFFERING -> Log.i(
+                    TAG_DIAG,
+                    "buffering-start pos=${player.currentPosition} " +
+                        "item=${player.currentMediaItem?.mediaId}",
+                )
+
+                Player.STATE_READY -> Log.i(
+                    TAG_DIAG,
+                    "buffering-end   pos=${player.currentPosition}",
+                )
+            }
             push()
             when (playbackState) {
                 Player.STATE_READY -> startTicker()
@@ -510,6 +806,40 @@ class MusicPlayer(
         }
 
         /**
+         * 诊断：谁把「想播」改掉了。
+         *
+         * `reason=audio-focus-loss` = 别的 App / 通知音 / 导航播报抢了音频焦点。
+         * media3 会自动暂停、焦点还回来后自动继续 —— 听感就是「断一下又恢复」，
+         * 而且**以前完全看不到**。`reason=user` 才是我们自己的按钮（暂停/继续）。
+         */
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            Log.i(
+                TAG_DIAG,
+                "playWhenReady=$playWhenReady reason=${playWhenReadyReasonName(reason)} " +
+                    "pos=${player.currentPosition}",
+            )
+        }
+
+        /**
+         * 诊断：位置跳变（seek / 自动切歌）。
+         *
+         * 排查"反复重新加载"时靠这一行：如果每 3 秒出现一次 `reason=seek` 回到 0，
+         * 说明有东西在不停打断播放（我们自己的代码或界面），不是网络问题。
+         */
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int,
+        ) {
+            Log.i(
+                TAG_DIAG,
+                "position-jump ${oldPosition.positionMs}→${newPosition.positionMs} " +
+                    "reason=${discontinuityReasonName(reason)} " +
+                    "item=${oldPosition.mediaItemIndex}→${newPosition.mediaItemIndex}",
+            )
+        }
+
+        /**
          * 自动前进到下一首（或手动切歌）时触发。
          *
          * ⚠️ **每首歌的开头空白秒数不一样**，而 `setMediaItems` 只能给**第一条**指定
@@ -522,6 +852,7 @@ class MusicPlayer(
          * "换版本保持进度"一起打回去（这是 2026-09-16 修掉的隐患）。
          */
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            Log.i(TAG_DIAG, "item-transition item=${mediaItem?.mediaId} reason=$reason")
             if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
                 val filler = queue.getOrNull(player.currentMediaItemIndex)?.fillerMs ?: 0L
                 if (filler > 0L) player.seekTo(filler)
@@ -544,6 +875,18 @@ class MusicPlayer(
         }
 
         override fun onPlayerError(error: PlaybackException) {
+            /*
+             * 诊断：errorCodeName + 底层 cause 一起打。
+             * `ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT` / `..._FAILED` 是网络，
+             * `ERROR_CODE_IO_BAD_HTTP_STATUS` 是 403/404（镜像缺文件），两者处理方式完全不同。
+             * ⚠️ ExoPlayer 默认会**先重试 3 次**（1s/2s/4s 退避），所以这里出现
+             * 一般意味着"重试也没救回来"；只断一下又恢复的情况看不到这一行。
+             */
+            Log.i(
+                TAG_DIAG,
+                "player-error code=${error.errorCodeName} pos=${player.currentPosition} " +
+                    "item=${player.currentMediaItem?.mediaId} msg=${error.message} cause=${error.cause}",
+            )
             stopTicker()
             _state.update {
                 it.copy(
@@ -556,8 +899,126 @@ class MusicPlayer(
         }
     }
 
+    /**
+     * 诊断：每一次**上游**请求的耗时与吞吐。
+     *
+     * 为什么需要：`buffering-start/end` 只能说明"在卡"，分不清是网络慢、
+     * 请求的是哪个 host、还是缓存空洞导致的碎请求。这里把每次 load 的
+     * 位置 / 字节数 / 毫秒 / 折算 kbps 打出来，一眼就能判断：
+     *  - `kbps` 远低于 300 且 host 是镜像 → 线路/协议问题；
+     *  - `kbps` 正常但一次只拉几十 KB → 缓存空洞（CacheDataSource 在补洞）；
+     *  - host 是 storage.sekai.best → 镜像回退被触发了。
+     */
+    private val loadLogger = object : AnalyticsListener {
+        override fun onLoadStarted(
+            eventTime: AnalyticsListener.EventTime,
+            loadEventInfo: LoadEventInfo,
+            mediaLoadData: MediaLoadData,
+        ) {
+            Log.i(
+                TAG_DIAG,
+                "load-start host=${loadEventInfo.uri.host} " +
+                    "pos=${loadEventInfo.dataSpec.position} len=${loadEventInfo.dataSpec.length}",
+            )
+            armLoadWatchdog()
+        }
+
+        override fun onLoadCompleted(
+            eventTime: AnalyticsListener.EventTime,
+            loadEventInfo: LoadEventInfo,
+            mediaLoadData: MediaLoadData,
+        ) {
+            val ms = loadEventInfo.loadDurationMs
+            val bytes = loadEventInfo.bytesLoaded
+            // bytes*8/ms = kbit/s（1 byte/ms = 8 kbit/s）
+            val kbps = if (ms > 0) (bytes * 8.0 / ms) else 0.0
+            Log.i(
+                TAG_DIAG,
+                "load-done  host=${loadEventInfo.uri.host} bytes=$bytes ms=$ms " +
+                    "kbps=${"%.0f".format(kbps)} pos=${loadEventInfo.dataSpec.position}",
+            )
+            disarmLoadWatchdog()
+        }
+
+        override fun onLoadError(
+            eventTime: AnalyticsListener.EventTime,
+            loadEventInfo: LoadEventInfo,
+            mediaLoadData: MediaLoadData,
+            error: java.io.IOException,
+            wasCanceled: Boolean,
+        ) {
+            Log.i(
+                TAG_DIAG,
+                "load-error canceled=$wasCanceled host=${loadEventInfo.uri.host} " +
+                    "bytes=${loadEventInfo.bytesLoaded} ms=${loadEventInfo.loadDurationMs} " +
+                    "err=${error.javaClass.simpleName}: ${error.message}",
+            )
+        }
+
+        /**
+         * 诊断：load 被**取消**（不算失败，但会解释"没有 load-done 就重新 load-start"）。
+         * 典型来源：缓冲区已满（LoadControl 让 loader 停下）、seek、换媒体项。
+         */
+        override fun onLoadCanceled(
+            eventTime: AnalyticsListener.EventTime,
+            loadEventInfo: LoadEventInfo,
+            mediaLoadData: MediaLoadData,
+        ) {
+            Log.i(
+                TAG_DIAG,
+                "load-cancel host=${loadEventInfo.uri.host} bytes=${loadEventInfo.bytesLoaded} " +
+                    "ms=${loadEventInfo.loadDurationMs} pos=${loadEventInfo.dataSpec.position}",
+            )
+            disarmLoadWatchdog()
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 加载看门狗（2026-11-20 排查"播着播着就停"用）
+    //
+    // 真机现象：缓存未命中的曲目会卡在"buffering 且没有网络请求"的状态里，
+    // logcat 一个事件都不再出 —— 加载线程卡在了 dataSource.open() 之前/之内，
+    // 但没有 root 拿不到线程栈。这里让 App **自己**在卡住 20 秒时把
+    // 加载器/OkHttp 相关线程的调用栈打到 logcat（`watchdog` 前缀），一击定位。
+    // ─────────────────────────────────────────────────────────────
+
+    /** 自增的 load 序号：start 时 +1，任何"结束"（done/error/cancel）记下这个值。 */
+    private var loadSeq = 0L
+    private var lastFinishedLoadSeq = 0L
+
+    private fun armLoadWatchdog() {
+        val seq = ++loadSeq
+        scope.launch {
+            delay(LOAD_WATCHDOG_MS)
+            // 缓冲区满了之后 loader 会**正常地**在 ConditionVariable 上等播放消耗数据
+            //（buffering 起点是"加载完成"而非"卡住"），那种等待不是故障，别误报。
+            if (lastFinishedLoadSeq < seq &&
+                player.playbackState == Player.STATE_BUFFERING
+            ) {
+                dumpLoaderStacks("load#$seq 超过 ${LOAD_WATCHDOG_MS / 1000}s 没有结果且仍在缓冲")
+            }
+        }
+    }
+
+    private fun disarmLoadWatchdog() {
+        lastFinishedLoadSeq = loadSeq
+    }
+
+    private fun dumpLoaderStacks(reason: String) {
+        val sb = StringBuilder()
+        Thread.getAllStackTraces().forEach { (thread, stack) ->
+            val n = thread.name
+            if (n.contains("Loade") || n.contains("OkHttp") || n.contains("ExoPlayer")) {
+                sb.appendLine("  thread=$n state=${thread.state}")
+                stack.take(30).forEach { sb.appendLine("    at $it") }
+            }
+        }
+        Log.i(TAG_DIAG, "watchdog $reason\n$sb")
+    }
+
     init {
         player.addListener(listener)
+        player.addAnalyticsListener(loadLogger)
     }
 
     /**
@@ -571,6 +1032,11 @@ class MusicPlayer(
     fun playQueue(tracks: List<MusicTrack>, startIndex: Int, startFromDisplayMs: Long = 0L) {
         if (tracks.isEmpty()) return
         val index = startIndex.coerceIn(0, tracks.lastIndex)
+        Log.i(
+            TAG_DIAG,
+            "playQueue size=${tracks.size} index=$index from=$startFromDisplayMs " +
+                "track=${tracks[index].musicId}-${tracks[index].vocalId}",
+        )
         queue = tracks
         val startAt = playerPositionMs(startFromDisplayMs, tracks[index].fillerMs)
 
@@ -788,6 +1254,7 @@ class MusicPlayer(
         sleepTimerJob = null
         scope.cancel()
         player.removeListener(listener)
+        player.removeAnalyticsListener(loadLogger)
         player.release()
     }
 
@@ -854,6 +1321,9 @@ class MusicPlayer(
 
     private companion object {
         const val TICK_MS = 250L
+
+        /** 加载看门狗：一次 load 超过这么久没有结果，就把加载线程栈打到 logcat。 */
+        const val LOAD_WATCHDOG_MS = 20_000L
 
         /** 定时器每秒对一次墙钟（见 [startSleepTimer]）。 */
         const val TICK_MS_SLEEP = 1_000L

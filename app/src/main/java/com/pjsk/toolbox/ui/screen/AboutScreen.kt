@@ -159,6 +159,7 @@ fun AboutScreen(onBack: () -> Unit) {
                 "https://sekai-world.github.io/sekai-master-db-*-diff/*.json",
                 "https://storage.sekai.best/sekai-jp-assets/",
                 "https://api.github.com/repos/Sekai-World/sekai-master-db*-diff/commits",
+                "https://api.github.com/repos/3beuml/sekai-lmc/releases/latest",
             )
 
             Section("隐私")

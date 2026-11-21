@@ -14,6 +14,8 @@ import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Style
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -24,6 +26,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import com.pjsk.toolbox.data.update.AppUpdate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
@@ -277,9 +281,17 @@ private val NAV_BAR_HEIGHT = 56.dp
 @Composable
 fun AppNav() {
     val navController = rememberNavController()
-    val container = (LocalContext.current.applicationContext as PjskApp).container
+    val context = LocalContext.current
+    val container = (context.applicationContext as PjskApp).container
     val syncState by container.syncManager.state.collectAsState()
     val region = syncState.region
+
+    // 「更多」图标上的更新角标：开屏静默查一次（PjskApp），更多页手动查也共享同一份状态。
+    // 判定口径在 AppUpdate.shouldShowDot：屏蔽只认具体版本，之后出的新版仍会提醒。
+    val currentVersion = remember { AppUpdate.localVersion(context) }
+    val updateRelease by container.updateCenter.release.collectAsState()
+    val mutedVersion by container.updateCenter.mutedVersion.collectAsState()
+    val hasUpdate = AppUpdate.shouldShowDot(currentVersion, updateRelease?.version, mutedVersion)
 
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
@@ -359,7 +371,16 @@ fun AppNav() {
                                         }
                                     }
                                 },
-                                icon = { Icon(item.icon, contentDescription = item.label) },
+                                icon = {
+                                    // 「更多」有新版本时挂一个小红点；其余图标原样。
+                                    if (item.route == Routes.SETTINGS && hasUpdate) {
+                                        BadgedBox(badge = { Badge() }) {
+                                            Icon(item.icon, contentDescription = item.label)
+                                        }
+                                    } else {
+                                        Icon(item.icon, contentDescription = item.label)
+                                    }
+                                },
                                 // 只留图标：文字标签去掉，省下的高度给歌曲状态栏（用户拍的方案 A）。
                                 // contentDescription 保留着，无障碍读屏仍然能念出这是哪一项。
                                 label = null,

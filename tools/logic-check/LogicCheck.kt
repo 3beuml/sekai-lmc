@@ -1,3 +1,4 @@
+import androidx.media3.common.Player
 import com.pjsk.toolbox.data.card.CardArtPlan
 import com.pjsk.toolbox.data.card.CardAttr
 import com.pjsk.toolbox.data.card.CardQuery
@@ -210,6 +211,8 @@ import com.pjsk.toolbox.data.palette.rgbToHsl
 import com.pjsk.toolbox.data.palette.whiteOrBlack
 import com.pjsk.toolbox.data.remote.TableCatalog
 import com.pjsk.toolbox.data.story.StoryAssetKind
+import com.pjsk.toolbox.data.update.AppUpdate
+import com.pjsk.toolbox.data.player.playWhenReadyReasonName
 import com.pjsk.toolbox.data.sync.DatapackImportOrder
 import com.pjsk.toolbox.data.sync.DatapackSchema
 import com.pjsk.toolbox.data.sync.SyncDecision
@@ -3862,6 +3865,12 @@ fun main(args: Array<String>) {
     //    （MethodTooLargeException），再往里塞就会被 kotlinc 拒绝。新节也请照这个来。
     checkArtworkPalette()
 
+    // 第 32 节：检测更新（App 自身版本，与 master data 同步无关）。
+    checkAppUpdate()
+
+    // 第 33 节：播放中断诊断的原因映射。
+    checkPlaybackDiagnostics()
+
 
     // ─────────────────────────────────────────────────────────
     println("\n" + "=".repeat(60))
@@ -4140,4 +4149,103 @@ check(
     chromaOf(warmPalette.accentContainer) <= 0.12f,
     "实际 chroma=${chromaOf(warmPalette.accentContainer)}",
 )
+}
+
+/**
+ * 第 32 节：检测更新（App 自身版本，与 master data 同步无关）。
+ *
+ * 抽成独立函数（同第 31 节）：main() 已经贴着 JVM 64KB 方法上限。
+ * 这一层错的后果**完全静默**：版本比较写反会让新版本永远不提示，
+ * 或者把旧版本当成新版；界面上都只表现为「没有发现更新」。
+ *
+ * 解析用假 JSON，**不联网** —— 自检必须离线可跑。
+ */
+private fun checkAppUpdate() {
+    section("32. 检测更新：版本比较 / 角标判定 / release 解析")
+
+    // ── 版本比较（versionName 口径，不是 versionCode）──
+    checkEq("新版 > 当前（0.1.46 > 0.1.45）", AppUpdate.compareVersions("0.1.46", "0.1.45"), 1)
+    checkEq("更旧 < 当前", AppUpdate.compareVersions("0.1.44", "0.1.45"), -1)
+    checkEq("相同版本", AppUpdate.compareVersions("0.1.45", "0.1.45"), 0)
+    checkEq("tag 的小写 v 前缀能比", AppUpdate.compareVersions("v0.1.46", "0.1.45"), 1)
+    checkEq("大写 V 前缀也能比", AppUpdate.compareVersions("V0.1.46", "0.1.45"), 1)
+    checkEq("段数不齐时短段补 0（0.2 与 0.2.0 同义）", AppUpdate.compareVersions("0.2", "0.2.0"), 0)
+    checkEq("null 对 null 视为相同", AppUpdate.compareVersions(null, null), 0)
+    checkEq("空串对空串视为相同", AppUpdate.compareVersions("", ""), 0)
+    checkEq(
+        "★ 预发版小于正式版（装了 rc 的人在正式版发布后要能看到提示）",
+        AppUpdate.compareVersions("0.1.46-rc1", "0.1.46"),
+        -1,
+    )
+    checkEq("★ 正式版大于预发版", AppUpdate.compareVersions("0.1.46", "0.1.46-rc1"), 1)
+    checkEq("rc 之间比后缀数字（rc2 > rc1）", AppUpdate.compareVersions("0.1.46-rc2", "0.1.46-rc1"), 1)
+    checkEq("数字段有差时后缀不参与", AppUpdate.compareVersions("0.1.45-rc2", "0.1.46-rc1"), -1)
+
+    // ── 角标判定 ──
+    check("有新版才亮", AppUpdate.shouldShowDot("0.1.45", "0.1.46", muted = null))
+    check("同版本不亮", !AppUpdate.shouldShowDot("0.1.45", "0.1.45", muted = null))
+    check("远端更旧不亮", !AppUpdate.shouldShowDot("0.1.45", "0.1.44", muted = null))
+    check(
+        "★ 远端还没查到（null）不亮 —— 不确定的事不吓唬人",
+        !AppUpdate.shouldShowDot("0.1.45", null, muted = null),
+    )
+    check("点过「不再提醒此版本」后不亮", !AppUpdate.shouldShowDot("0.1.45", "0.1.46", muted = "0.1.46"))
+    check("★ 屏蔽只认具体版本：之后出的 0.1.47 仍然亮", AppUpdate.shouldShowDot("0.1.45", "0.1.47", muted = "0.1.46"))
+    check("屏蔽的版本比远端旧（用户从老版本直接升上来）照样亮", AppUpdate.shouldShowDot("0.1.45", "0.1.47", muted = "0.1.44"))
+
+    // ── release 解析 ──
+    val releaseJson = """
+        {"tag_name":"v0.1.46",
+         "html_url":"https://github.com/3beuml/sekai-lmc/releases/tag/v0.1.46",
+         "body":"更新说明第一行\n第二行",
+         "assets":[{"name":"README.txt","browser_download_url":"https://x/readme"},
+                   {"name":"app-release.apk","browser_download_url":"https://x/app-release.apk"}]}
+    """.trimIndent()
+    val release = AppUpdate.parseRelease(releaseJson)
+    checkEq("★ tag 去掉 v 前缀（与本地 versionName 同口径）", release?.version, "0.1.46")
+    checkEq("★ assets 里只认 .apk（README 不会被当成下载地址）", release?.downloadUrl, "https://x/app-release.apk")
+    checkEq(
+        "发布页地址原样带出（「去下载」的兜底入口）",
+        release?.pageUrl,
+        "https://github.com/3beuml/sekai-lmc/releases/tag/v0.1.46",
+    )
+    check("更新说明整段带出来", release?.notes?.contains("第二行") == true)
+
+    val noApk = AppUpdate.parseRelease("""{"tag_name":"0.1.47","html_url":"https://x"}""")
+    check("没有 apk 附件时 downloadUrl 为 null（调用方退回发布页）", noApk?.downloadUrl == null)
+    check("没有 tag → 解析失败（不能当成一个新版本）", AppUpdate.parseRelease("""{"html_url":"https://x"}""") == null)
+    check("不是 JSON（例如被网关拦下的 HTML）→ 解析失败而不是崩溃", AppUpdate.parseRelease("<html>404</html>") == null)
+
+    val emptyNotes = AppUpdate.parseRelease("""{"tag_name":"0.1.46","html_url":"https://x","body":""}""")
+    checkEq("空 body 解析成空串（界面显示「没写更新说明」）", emptyNotes?.notes, "")
+}
+
+/**
+ * 第 33 节：播放中断诊断。
+ *
+ * 只断言诊断日志的**原因映射** —— 它是定位"断一下又自己恢复"的分水岭
+ * （重点看 `audio-focus-loss` 有没有出现过）。真正的缓冲/超时改动要靠真机日志验证。
+ */
+private fun checkPlaybackDiagnostics() {
+    section("33. 播放中断诊断：playWhenReady 变化原因的可读名")
+
+    checkEq(
+        "用户按钮 → user",
+        playWhenReadyReasonName(Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST),
+        "user",
+    )
+    checkEq(
+        "★ 音频焦点被抢 → audio-focus-loss（排查时最该找的就是这一条）",
+        playWhenReadyReasonName(Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS),
+        "audio-focus-loss",
+    )
+    checkEq(
+        "播完一首 → end-of-item",
+        playWhenReadyReasonName(Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM),
+        "end-of-item",
+    )
+    check(
+        "未知原因不会抛异常（打印 other(N)）",
+        playWhenReadyReasonName(99).startsWith("other("),
+    )
 }
